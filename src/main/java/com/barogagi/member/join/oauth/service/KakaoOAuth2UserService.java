@@ -4,8 +4,11 @@ import com.barogagi.member.domain.UserMembershipInfo;
 import com.barogagi.member.join.basic.dto.JoinRequestDTO;
 import com.barogagi.member.join.basic.service.MemberSignupService;
 import com.barogagi.member.join.oauth.dto.OAuth2UserDTO;
+import com.barogagi.member.join.oauth.exception.OAuthJoinException;
+import com.barogagi.member.repository.DeletedMembershipRepository;
 import com.barogagi.member.service.UserMembershipService;
 import com.barogagi.util.EncryptUtil;
+import com.barogagi.util.exception.ErrorCode;
 import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -18,6 +21,7 @@ import org.springframework.security.oauth2.core.user.DefaultOAuth2User;
 import org.springframework.security.oauth2.core.user.OAuth2User;
 import org.springframework.stereotype.Service;
 
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
 
@@ -29,9 +33,12 @@ public class KakaoOAuth2UserService implements OAuth2UserService<OAuth2UserReque
     private final EncryptUtil encryptUtil;
     private final MemberSignupService memberSignupService;
 
+    private final DeletedMembershipRepository deletedMembershipRepository;
+
+    private static final int REJOIN_BLOCK_DAYS = 90;
+
     private static final Logger logger = LoggerFactory.getLogger(KakaoOAuth2UserService.class);
     private final DefaultOAuth2UserService delegate = new DefaultOAuth2UserService();
-
 
     @Override
     public OAuth2User loadUser(OAuth2UserRequest userRequest) throws OAuth2AuthenticationException {
@@ -65,11 +72,18 @@ public class KakaoOAuth2UserService implements OAuth2UserService<OAuth2UserReque
             }
 
             // id에 prefix 추가
-            id = "provider=kakao" + id;
+            id = "kakao" + id;
         }
 
         // 2) 우리 DB에 upsert
         try {
+            // 일정 기간 동안 동일한 아이디로 회원가입 금지
+            LocalDateTime limitDate = LocalDateTime.now().minusDays(REJOIN_BLOCK_DAYS);
+            boolean blocked = deletedMembershipRepository.existsRecentlyWithdrawnUser(id.trim(), limitDate);
+            if (blocked) {
+                throw new OAuthJoinException(ErrorCode.NO_SIGN_UP_DAYS);
+            }
+
             // 카카오로 회원가입한 정보가 있는지 체크
             OAuth2UserDTO oAuth2UserDTO = new OAuth2UserDTO();
             oAuth2UserDTO.setSub(id);
@@ -92,8 +106,12 @@ public class KakaoOAuth2UserService implements OAuth2UserService<OAuth2UserReque
 
                 logger.info("KAKAO join membershipNo={}", membershipNo);
             }
+        } catch (OAuthJoinException e) {
+            throw  e;
+
         } catch (Exception e) {
             logger.error("KAKAO OAuth 회원가입 중 오류 발생: {}", e.getMessage());
+            throw new OAuth2AuthenticationException(ErrorCode.FAIL_OAUTH2_LOGIN.getMessage());
         }
 
         // 3) 컨트롤러/핸들러에서 공통으로 쓰기 쉽도록 key를 통일해서 리턴

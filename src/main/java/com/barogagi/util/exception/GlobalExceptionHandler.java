@@ -5,6 +5,7 @@ import com.barogagi.discord.DiscordNotifier;
 import com.barogagi.discord.ErrorThrottle;
 import com.barogagi.discord.dto.DiscordErrorMessage;
 import com.barogagi.response.ApiResponse;
+import com.barogagi.sendMessage.service.CommonService;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.ConstraintViolationException;
 import lombok.RequiredArgsConstructor;
@@ -19,7 +20,6 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;
-import java.util.Arrays;
 
 @Slf4j
 @RestControllerAdvice
@@ -28,6 +28,7 @@ public class GlobalExceptionHandler {
 
     private final DiscordNotifier discordNotifier;
     private final Environment environment;
+    private final CommonService commonService;
     private final ErrorThrottle errorThrottle;
 
     /**
@@ -40,7 +41,7 @@ public class GlobalExceptionHandler {
             BusinessException e,
             HttpServletRequest request
     ) {
-        if (isProd() && e.getErrorCode().isNotify()) {
+        if ((commonService.isDev() || commonService.isProd()) && e.getErrorCode().isNotify()) {
             discordNotifier.sendError(DiscordErrorMessage.from(e, request, activeProfile()));
         }
 
@@ -82,18 +83,8 @@ public class GlobalExceptionHandler {
         String key = e.getClass().getName() + request.getRequestURI();
 
         // Discord 알림 전송
-        if (isProd() && errorThrottle.shouldNotify(key)) {
-            discordNotifier.sendError(
-                    DiscordErrorMessage.builder()
-                            .service("BAROGAGI-API")
-                            .environment(activeProfile())
-                            .uri(request.getRequestURI())
-                            .method(request.getMethod())
-                            .exception(e.getClass().getSimpleName())
-                            .message(e.getMessage())
-                            .stackTrace(getStackTrace(e))
-                            .build()
-            );
+        if ((commonService.isDev() || commonService.isProd()) && errorThrottle.shouldNotify(key)) {
+            discordNotifier.sendError(DiscordErrorMessage.from(e, request, activeProfile(), getStackTrace(e)));
         }
 
         return ResponseEntity
@@ -105,7 +96,8 @@ public class GlobalExceptionHandler {
     }
 
     private String activeProfile() {
-        return String.join(",", environment.getActiveProfiles());
+        String[] profiles = environment.getActiveProfiles();
+        return (profiles.length > 0) ? profiles[0] : "";
     }
 
     private String getStackTrace(Exception e) {
@@ -116,10 +108,6 @@ public class GlobalExceptionHandler {
         return sw.toString().length() > 1500
                 ? sw.toString().substring(0, 1500)
                 : sw.toString();
-    }
-
-    private boolean isProd() {
-        return Arrays.asList(environment.getActiveProfiles()).contains("prod");
     }
 }
 

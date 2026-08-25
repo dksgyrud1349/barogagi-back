@@ -29,12 +29,22 @@ jobs:
             echo "HOST=${{ secrets.PROD_HOST }}" >> $GITHUB_ENV
             echo "TARGET_DIR=${{ secrets.PROD_TARGET_DIR }}" >> $GITHUB_ENV
             echo "USERNAME=${{ secrets.PROD_USERNAME }}" >> $GITHUB_ENV
-            echo "${{ secrets.APP_PROPS_RELEASE }}" > ./src/main/resources/application.properties
+            echo "${{ secrets.APP_PROPS_RELEASE_BASE64 }}" | base64 --decode > ./src/main/resources/application.properties
           else
             echo "HOST=${{ secrets.TEST_HOST }}" >> $GITHUB_ENV
             echo "TARGET_DIR=${{ secrets.TEST_TARGET_DIR }}" >> $GITHUB_ENV
             echo "USERNAME=${{ secrets.TEST_USERNAME }}" >> $GITHUB_ENV
             echo "${{ secrets.APP_PROPS_MAIN_BASE64 }}" | base64 --decode > ./src/main/resources/application.properties
+          fi
+          
+      - name: Create Firebase JSON
+        run: |
+          mkdir -p ./src/main/resources/firebase
+
+          if [[ "${GITHUB_REF##*/}" == "release" ]]; then
+            echo "${{ secrets.FIREBASE_JSON_RELEASE_BASE64 }}" | base64 --decode > ./src/main/resources/firebase/firebase-service-account.json
+          else
+            echo "${{ secrets.FIREBASE_JSON_TEST_BASE64 }}" | base64 --decode > ./src/main/resources/firebase/firebase-service-account.json
           fi
 
       - name: Build jar file
@@ -43,41 +53,57 @@ jobs:
       - name: SCP jar and Dockerfile
         run: |
           set -e
+          cd ./target && md5sum *.jar > ../checksum.md5 && cd ..
           scp -i key.pem -o StrictHostKeyChecking=no \
             ./target/*.jar \
             ./Dockerfile \
+            checksum.md5 \
             $USERNAME@$HOST:$TARGET_DIR
 
-      - name: Deploy to TEST EC2 (main)
+      - name: Verify jar integrity on remote
+        run: |
+          ssh -i key.pem -o StrictHostKeyChecking=no \
+            $USERNAME@$HOST "cd $TARGET_DIR && md5sum -c checksum.md5"
+
+      - name: Deploy to TEST on Vultr (main)
         if: github.ref == 'refs/heads/main'
         run: |
           ssh -o ServerAliveInterval=30 -i key.pem -o StrictHostKeyChecking=no \
             $USERNAME@$HOST << EOF
             cd $TARGET_DIR
-            docker stop backend || true
-            docker rm backend || true
-            docker build -t backend .
-            docker run -d -p 8080:8080 --name backend backend
+            docker build -t barogagi-backend:test .
+            docker stop barogagi-backend-test || true
+            docker rm barogagi-backend-test || true
+            docker run -d \
+              --name barogagi-backend-test \
+              --restart unless-stopped \
+              -e TZ=Asia/Seoul \
+              -e SPRING_PROFILES_ACTIVE=prod \
+              -e SERVER_PORT=8080 \
+              -p 127.0.0.1:8083:8080 \
+              -v /srv/barogagi-test/backend/logs:/app/logs \
+              --network barogagi-test-net \
+              --memory 768m \
+              barogagi-backend:test
           EOF
 
       - name: Deploy to PROD (release - blue/green)
         if: github.ref == 'refs/heads/release'
         run: |
           ssh -o ServerAliveInterval=30 -i key.pem -o StrictHostKeyChecking=no \
-            $USERNAME@$HOST << 'EOF'
-
+            $USERNAME@$HOST << EOF
+          
             cd $TARGET_DIR
-
-            # 현재 active 확인 (nginx 기준)
-            if grep -q "8081" /etc/nginx/sites-available/barogagi.xyz; then
+          
+            if grep -q "8081" /etc/nginx/sites-available/fitpl.xyz; then
               TARGET="blue"
             else
               TARGET="green"
             fi
-
-            echo "Deploy target: $TARGET"
-
-            docker build -t barogagi-backend:${GITHUB_SHA::7} .
-            docker compose up -d backend-$TARGET
+          
+            echo "Deploy target: \$TARGET"
+          
+            docker build -t barogagi-backend:single .
+            docker compose up -d --force-recreate backend-\$TARGET
             /srv/barogagi/backend/scripts/switch.sh
           EOF

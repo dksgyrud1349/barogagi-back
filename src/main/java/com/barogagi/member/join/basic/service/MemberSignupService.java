@@ -1,11 +1,19 @@
 package com.barogagi.member.join.basic.service;
 
+import com.barogagi.batch.entity.KorTourOrgLocalCode;
+import com.barogagi.batch.repository.KorTourOrgLocalCodeRepository;
 import com.barogagi.config.PasswordConfig;
+import com.barogagi.member.domain.MembershipStatus;
 import com.barogagi.member.domain.UserMembershipInfo;
 import com.barogagi.member.join.basic.dto.JoinRequestDTO;
 import com.barogagi.member.join.basic.exception.JoinException;
+import com.barogagi.member.login.dto.UserIdDTO;
+import com.barogagi.member.repository.DeletedMembershipRepository;
 import com.barogagi.member.repository.UserMembershipRepository;
 import com.barogagi.response.ApiResponse;
+import com.barogagi.setting.service.SettingService;
+import com.barogagi.terms.exception.TermsException;
+import com.barogagi.terms.service.TermsService;
 import com.barogagi.util.EncryptUtil;
 import com.barogagi.util.InputValidate;
 import com.barogagi.util.Validator;
@@ -15,6 +23,11 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.security.SecureRandom;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
+import java.time.format.ResolverStyle;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -29,16 +42,22 @@ public class MemberSignupService {
     private final EncryptUtil encryptUtil;
     private final PasswordConfig passwordConfig;
 
+    private final TermsService termsService;
+    private final SettingService settingService;
+
     private final UserMembershipRepository userMembershipRepository;
+    private final DeletedMembershipRepository deletedMembershipRepository;
+    private final KorTourOrgLocalCodeRepository korTourOrgLocalCodeRepository;
 
     private static final SecureRandom random = new SecureRandom();
     private static final String ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    private static final int REJOIN_BLOCK_DAYS = 90;
 
     @Transactional
-    public ApiResponse signupBasic(JoinRequestDTO joinRequestDTO) {
+    public ApiResponse signupBasic(String apiSecretKey, JoinRequestDTO joinRequestDTO) {
 
         // 1. API SECRET KEY 일치 여부 확인
-        if(!validator.apiSecretKeyCheck(joinRequestDTO.getApiSecretKey())) {
+        if(!validator.apiSecretKeyCheck(apiSecretKey)) {
             throw new JoinException(ErrorCode.NOT_EQUAL_API_SECRET_KEY);
         }
 
@@ -47,50 +66,92 @@ public class MemberSignupService {
         // 선택 입력값(이메일, 생년월일, 성별, 닉네임)
         if(inputValidate.isEmpty(joinRequestDTO.getUserId())
                 || inputValidate.isEmpty(joinRequestDTO.getPassword())
-                || inputValidate.isEmpty(joinRequestDTO.getTel())) {
+                || inputValidate.isEmpty(joinRequestDTO.getTel())
+                || joinRequestDTO.getTermsDTO().getTermsAgreeList() == null
+                || joinRequestDTO.getTermsDTO().getTermsAgreeList().isEmpty()) {
             throw new JoinException(ErrorCode.EMPTY_DATA);
         }
 
-        // 3. 적합한 아이디인지 확인
-        // 아이디, 비밀번호 적합성 검사
-        if(!(validator.isValidId(joinRequestDTO.getUserId())
-                && validator.isValidPassword(joinRequestDTO.getPassword()))) {
+        // 3. 아이디, 비밀번호 적합성 검사
+        if(!(validator.isValidId(joinRequestDTO.getUserId()) && validator.isValidPassword(joinRequestDTO.getPassword()))) {
             throw new JoinException(ErrorCode.INVALID_SIGN_UP);
         }
 
+        // 4. 일정 기간 동안 동일한 아이디로 회원가입 금지
+        LocalDateTime limitDate = LocalDateTime.now().minusDays(REJOIN_BLOCK_DAYS);
+        boolean blocked = deletedMembershipRepository.existsRecentlyWithdrawnUser(joinRequestDTO.getUserId().trim(), limitDate);
+        if(blocked) {
+            throw new JoinException(ErrorCode.UNAVAILABLE_USER_ID);
+        }
+
+        // 4. 생년월일 데이터 처리
+        if(!inputValidate.isEmpty(joinRequestDTO.getBirth())) {
+            joinRequestDTO.setBirth(joinRequestDTO.getBirth().replaceAll("[^0-9]", ""));
+
+            // 8자리 숫자인지 확인
+            if (!joinRequestDTO.getBirth().matches("^\\d{8}$")) {
+                throw new JoinException(ErrorCode.FAIL_INVALID_BIRTH_DATE_FORMAT);
+            }
+
+            // 실제 날짜인지 검증
+            DateTimeFormatter formatter = DateTimeFormatter.ofPattern("uuuuMMdd").withResolverStyle(ResolverStyle.STRICT);
+            try {
+                LocalDate.parse(joinRequestDTO.getBirth(), formatter);
+            } catch (DateTimeParseException e) {
+                throw new JoinException(ErrorCode.FAIL_INVALID_BIRTH_DATE_FORMAT);
+            }
+        }
+
+        // 5. 아이디 중복 검사
         boolean existsByUserId = userMembershipRepository.existsByUserId(joinRequestDTO.getUserId().trim());
         if(existsByUserId) {
             throw new JoinException(ErrorCode.UNAVAILABLE_USER_ID);
         }
 
-        boolean existsNickname = userMembershipRepository.existsByNickName(joinRequestDTO.getNickName());
-        if(existsNickname) {
-            throw new JoinException(ErrorCode.UNAVAILABLE_NICKNAME);
+        // 6. 닉네임 중복 검사
+        if(!inputValidate.isEmpty(joinRequestDTO.getNickName())) {
+            boolean existsNickname = userMembershipRepository.existsByNickName(joinRequestDTO.getNickName());
+            if(existsNickname) {
+                throw new JoinException(ErrorCode.UNAVAILABLE_NICKNAME);
+            }
         }
 
-        // 4. 암호화
-        // 휴대전화번호, 비밀번호 암호화
+        // 7. 암호화 - 휴대전화번호
         joinRequestDTO.setTel(encryptUtil.encrypt(joinRequestDTO.getTel().replaceAll("[^0-9]", "")));
-        String encodedPassword = passwordConfig.passwordEncoder().encode(joinRequestDTO.getPassword());
-        joinRequestDTO.setPassword(encodedPassword);
 
-        // 이메일 값이 넘어오면 암호화
+        // 8. 전화번호 중복 검사 - 동일한 전화번호로 중복 회원가입이 불가능
+        UserIdDTO searchId = userMembershipRepository.findByTel(joinRequestDTO.getTel());
+        if(null != searchId) {
+            throw new JoinException(ErrorCode.FAIL_DUPLICATE_PHONE_NUMBER);
+        }
+
+        // 9. 이메일 값이 넘어오면 암호화
         if(!inputValidate.isEmpty(joinRequestDTO.getEmail())){
             joinRequestDTO.setEmail(encryptUtil.encrypt(joinRequestDTO.getEmail()));
         }
 
-        // 생년월일 데이터 처리
-        if(null != joinRequestDTO.getBirth()) {
-            joinRequestDTO.setBirth(joinRequestDTO.getBirth().replaceAll("[^0-9]", ""));
-        }
+        // 10. 암호화 - 비밀번호
+        String encodedPassword = passwordConfig.passwordEncoder().encode(joinRequestDTO.getPassword());
+        joinRequestDTO.setPassword(encodedPassword);
 
+        // 11. 일반 회원가입 값 세팅
         joinRequestDTO.setJoinType("BASIC");
 
-        // 6. 회원 정보 저장
+        // 12. 회원 정보 저장
         String membershipNo = this.signUp(joinRequestDTO);
         if(membershipNo.isEmpty()){
             throw new JoinException(ErrorCode.FAIL_SIGN_UP);
         }
+
+        // 13. 약관 동의 내용 저장
+        String resCode = termsService.insertTermsAgree(joinRequestDTO.getTermsDTO(), membershipNo);
+
+        if(!resCode.equals("200")) {
+            throw new TermsException(ErrorCode.FAIL_INSERT_TERMS);
+        }
+
+        // 14. 설정 값 기본 세팅
+        settingService.basicSetting(membershipNo);
 
         return ApiResponse.result(ErrorCode.SUCCESS_SIGN_UP);
     }
@@ -167,6 +228,24 @@ public class MemberSignupService {
 
     // 회원가입 정보 저장 기능
     public String signUp(JoinRequestDTO joinRequestDTO) {
+
+        Long localCodeNo = null;
+
+        // 선호 지역 입력 시 코드 -> 번호로 변환
+        if(!inputValidate.isEmpty(joinRequestDTO.getAreaCd())
+                && !inputValidate.isEmpty(joinRequestDTO.getSigunguCd())) {
+
+            // 12-1 지역코드 번호 조회
+            KorTourOrgLocalCode localCodeInfo = korTourOrgLocalCodeRepository.findLocalCodeInfo(
+                    joinRequestDTO.getAreaCd(), joinRequestDTO.getSigunguCd());
+
+            if(null == localCodeInfo) {
+                throw new JoinException(ErrorCode.NOT_FOUND_LOCAL_CODE);
+            }
+
+            localCodeNo = localCodeInfo.getLocalCodeNo();
+        }
+
         UserMembershipInfo userMembershipInfo = UserMembershipInfo.builder()
                 .membershipNo(this.generateMemberNo())
                 .userId(joinRequestDTO.getUserId())
@@ -177,6 +256,8 @@ public class MemberSignupService {
                 .gender(joinRequestDTO.getGender())
                 .nickName(joinRequestDTO.getNickName())
                 .joinType(joinRequestDTO.getJoinType())
+                .status(MembershipStatus.ACTIVE)
+                .preferredLocalCodeNo(localCodeNo)
                 .build();
 
         userMembershipRepository.save(userMembershipInfo);

@@ -4,10 +4,9 @@ import com.barogagi.ai.client.AIClient;
 import com.barogagi.ai.dto.AIReqDTO;
 import com.barogagi.ai.dto.AIReqWrapper;
 import com.barogagi.ai.dto.AIResDTO;
+import com.barogagi.config.exception.BusinessException;
 import com.barogagi.kakaoplace.client.KakaoPlaceClient;
 import com.barogagi.kakaoplace.dto.KakaoPlaceResDTO;
-import com.barogagi.naverblog.client.NaverBlogClient;
-import com.barogagi.naverblog.dto.NaverBlogResDTO;
 import com.barogagi.plan.command.entity.Item;
 import com.barogagi.plan.command.entity.Plan;
 import com.barogagi.plan.command.ex_entity.PlanUserMembershipInfo;
@@ -18,8 +17,8 @@ import com.barogagi.plan.dto.PlanRegistReqDTO;
 import com.barogagi.plan.dto.PlanRegistResDTO;
 import com.barogagi.plan.dto.UserAddedPlaceDTO;
 import com.barogagi.plan.enums.PLAN_SOURCE;
-import com.barogagi.plan.query.mapper.CategoryMapper;
-import com.barogagi.plan.query.mapper.ItemMapper;
+import com.barogagi.category.query.mapper.CategoryMapper;
+import com.barogagi.item.query.mapper.ItemMapper;
 import com.barogagi.region.command.entity.Place;
 import com.barogagi.region.command.entity.PlanRegion;
 import com.barogagi.region.command.entity.PlanRegionId;
@@ -32,18 +31,27 @@ import com.barogagi.region.dto.RegionRegistReqDTO;
 import com.barogagi.region.query.service.RegionGeoCodeService;
 import com.barogagi.region.query.service.RegionQueryService;
 import com.barogagi.region.query.vo.RegionDetailVO;
+import com.barogagi.response.ApiResponse;
 import com.barogagi.schedule.command.entity.Schedule;
 import com.barogagi.schedule.command.repository.ScheduleRepository;
 import com.barogagi.schedule.dto.ScheduleRegistReqDTO;
 import com.barogagi.schedule.dto.ScheduleRegistResDTO;
+import com.barogagi.schedule.exception.ScheduleException;
+import com.barogagi.schedule.query.service.ScheduleQueryService;
 import com.barogagi.tag.command.entity.*;
 import com.barogagi.tag.command.repository.ScheduleTagRepository;
 import com.barogagi.tag.command.repository.TagRepository;
 import com.barogagi.tag.dto.TagRegistReqDTO;
 import com.barogagi.tag.dto.TagRegistResDTO;
 import com.barogagi.tag.query.service.TagQueryService;
+import com.barogagi.tag.query.vo.TagDetailVO;
+import com.barogagi.tavily.client.TavilyClient;
+import com.barogagi.tavily.dto.TavilyResultDTO;
+import com.barogagi.util.MembershipUtil;
+import com.barogagi.util.Validator;
 import com.barogagi.util.exception.BasicException;
 import com.barogagi.util.exception.ErrorCode;
+import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -53,9 +61,8 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.*;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Collectors;
-
-import static com.barogagi.util.HtmlUtils.stripHtml;
 
 @Service
 public class ScheduleCommandService {
@@ -64,11 +71,12 @@ public class ScheduleCommandService {
     private final CategoryMapper categoryMapper;
     private final ItemMapper itemMapper;
     private final KakaoPlaceClient kakaoPlaceClient;
-    private final NaverBlogClient naverBlogClient;
+    private final TavilyClient tavilyClient;
     private final AIClient aiClient;
 
     private final TagQueryService tagQueryService;
     private final RegionGeoCodeService regionGeoCodeService;
+    private final ScheduleQueryService scheduleQueryService;
 
     private final ScheduleRepository scheduleRepository;
     private final ScheduleTagRepository scheduleTagRepository;
@@ -81,28 +89,29 @@ public class ScheduleCommandService {
     private final PlaceRepository placeRepository;
     private final RegionQueryService regionQueryService ;
 
+    private final Validator validator;
+    private final MembershipUtil membershipUtil;
 
     @Value("${kakao.radius}")
     private int radius;
 
-    @Value("${naver.display}")
-    private int naverBlogDisplay;
-
     @Autowired
     public ScheduleCommandService(CategoryMapper categoryMapper, ItemMapper itemMapper,
-                                  KakaoPlaceClient kakaoPlaceClient, NaverBlogClient naverBlogClient,
+                                  KakaoPlaceClient kakaoPlaceClient, TavilyClient tavilyClient,
                                   AIClient aiClient, TagQueryService tagQueryService, RegionGeoCodeService regionGeoCodeService,
                                   ScheduleRepository scheduleRepository, ScheduleTagRepository scheduleTagRepository,
-                                  TagRepository tagRepository, ItemRepository itemRepository,
+                                  TagRepository tagRepository, ItemRepository itemRepository, ScheduleQueryService scheduleQueryService,
                                   PlanRepository planRepository, PlanTagRepository planTagRepository,
                                   RegionRepository regionRepository, PlanRegionRepository planRegionRepository,
-                                  PlaceRepository placeRepository, RegionQueryService regionQueryService) {
+                                  PlaceRepository placeRepository, RegionQueryService regionQueryService,
+                                  Validator validator, MembershipUtil membershipUtil) {
         this.itemMapper = itemMapper;
         this.categoryMapper = categoryMapper;
         this.kakaoPlaceClient = kakaoPlaceClient;
-        this.naverBlogClient = naverBlogClient;
+        this.tavilyClient = tavilyClient;
         this.aiClient = aiClient;
         this.tagQueryService = tagQueryService;
+        this.scheduleQueryService = scheduleQueryService;
         this.regionGeoCodeService = regionGeoCodeService;
         this.scheduleRepository = scheduleRepository;
         this.scheduleTagRepository = scheduleTagRepository;
@@ -114,84 +123,151 @@ public class ScheduleCommandService {
         this.planRegionRepository = planRegionRepository;
         this.placeRepository = placeRepository;
         this.regionQueryService = regionQueryService;
+        this.validator = validator;
+        this.membershipUtil = membershipUtil;
     }
 
 
 
-    public ScheduleRegistResDTO createSchedule(ScheduleRegistReqDTO scheduleRegistReqDTO) {
-
-        List<PlanRegistResDTO> planResList = new ArrayList<>();
-
-        // 스케줄 공통 정보
-        String scheduleNm = scheduleRegistReqDTO.getScheduleNm();
-        String startDate  = scheduleRegistReqDTO.getStartDate();
-        String endDate    = scheduleRegistReqDTO.getEndDate();
-
-
-        scheduleRegistReqDTO.getPlanRegistReqDTOList().forEach(plan -> {
-            if (plan.getPlanTagRegistReqDTOList() != null) {
-                plan.getPlanTagRegistReqDTOList().forEach(tag -> {
-                    logger.info("tagNum={}, tagNm={}", tag.getTagNum(), tag.getTagNm());
-                });
-            } else {
-                logger.info("태그 없음");
+    public ApiResponse createSchedule(ScheduleRegistReqDTO scheduleRegistReqDTO, HttpServletRequest request) {
+        try {
+            // 1. API SECRET KEY 일치 여부 확인
+            if (!validator.apiSecretKeyCheck(request.getHeader("API-KEY"))) {
+                throw new ScheduleException(ErrorCode.NOT_EQUAL_API_SECRET_KEY);
             }
-        });
 
-        for (PlanRegistReqDTO plan : scheduleRegistReqDTO.getPlanRegistReqDTOList()) {
-
-            if (plan.getIsUserAdded().equals("Y")) {
-                // ➜ A. 사용자가 직접 입력한 플랜
-                logger.info("A. 사용자가 직접 입력한 플랜 plan={}", plan);
-                PlanRegistResDTO planRes = handleUserPlan(plan);
-                planResList.add(planRes);
-
-            } else {
-                // ➜ B. AI가 추천해줘야 하는 플랜
-                logger.info("B. AI가 추천해줘야 하는 플랜 plan={}", plan);
-                PlanRegistResDTO planRes = handleAIPlan(scheduleRegistReqDTO, plan);
-                planResList.add(planRes);
+            // 2. 회원번호 조회
+            Map<String, Object> membershipInfo = membershipUtil.membershipNoService(request);
+            if (!membershipInfo.get("resultCode").equals("A200")) {
+                return ApiResponse.error(ErrorCode.NOT_EXIST_ACCESS_AUTH.getCode(), ErrorCode.NOT_EXIST_ACCESS_AUTH.getMessage());
             }
+
+            // 입력값 검증
+            // 날짜 형식 검증
+            List<PlanRegistResDTO> planResList = new ArrayList<>();
+
+            // 스케줄 공통 정보
+            String scheduleNm = scheduleRegistReqDTO.getScheduleNm();
+            String startDate = scheduleRegistReqDTO.getStartDate();
+            String endDate = scheduleRegistReqDTO.getEndDate();
+            String scheduleMemo = scheduleRegistReqDTO.getScheduleMemo();
+
+            for (PlanRegistReqDTO plan : scheduleRegistReqDTO.getPlanRegistReqDTOList()) {
+
+                if (plan.getIsUserAdded().equals("Y")) {
+                    // ➜ A. 사용자가 직접 입력한 플랜
+                    logger.info("A. 사용자가 직접 입력한 플랜 plan={}", plan);
+                    PlanRegistResDTO planRes = handleUserPlan(plan);
+                    planResList.add(planRes);
+
+                } else {
+                    // ➜ B. AI가 추천해줘야 하는 플랜
+                    logger.info("B. AI가 추천해줘야 하는 플랜 plan={}", plan);
+                    PlanRegistResDTO planRes = handleAIPlan(scheduleRegistReqDTO, plan);
+                    planResList.add(planRes);
+                }
+            }
+
+            // ---------- 6) ScheduleRegistResDTO 묶어서 리턴 ----------
+            List<TagRegistResDTO> tagResList = Optional.ofNullable(scheduleRegistReqDTO.getScheduleTagRegistReqDTOList())
+                    .orElseGet(List::of)
+                    .stream()
+                    .map(tag -> {
+                        TagDetailVO tagDetail = tagQueryService.findTagByTagNum(tag.getTagNum());
+                        return TagRegistResDTO.builder()
+                                .tagNum(tag.getTagNum())
+                                .tagNm(tagDetail != null ? tagDetail.getTagNm() : null)
+                                .build();
+                    })
+                    .collect(Collectors.toList());
+
+            ScheduleRegistResDTO result = ScheduleRegistResDTO.builder()
+                    .scheduleNm(scheduleNm)
+                    .startDate(startDate)
+                    .endDate(endDate)
+                    .scheduleMemo(scheduleMemo)
+                    .planRegistResDTOList(planResList)
+                    .scheduleTagRegistResDTOList(tagResList)
+                    .build();
+
+            return ApiResponse.resultData(
+                    result,
+                    ErrorCode.SUCCESS_SCHEDULE_CREATE.getCode(),
+                    ErrorCode.SUCCESS_SCHEDULE_CREATE.getMessage());
+        } catch (BusinessException e) {
+            return ApiResponse.error(e.getCode(), e.getMessage());
+        } catch (Exception e) {
+            return ApiResponse.error(ErrorCode.INTERNAL_ERROR.getCode(), ErrorCode.INTERNAL_ERROR.getMessage());
         }
-
-        // ---------- 6) ScheduleRegistResDTO 묶어서 리턴 ----------
-        return ScheduleRegistResDTO.builder()
-                .scheduleNm(scheduleNm)
-                .startDate(startDate)
-                .endDate(endDate)
-                .planRegistResDTOList(planResList)
-                .build();
     }
 
+    /**
+     * AI 기반 플랜 생성 처리.
+     *
+     * Tavily 웹 검색 → AI 장소명 추출 → 카카오 장소 상세 조회 → AI 추천 순서로 진행하여
+     * 최종 추천 장소를 선정하고 플랜 응답 DTO를 생성한다.
+     *
+     * 처리 흐름:
+     * 1. 지역 결정 - plan 지역이 있으면 그대로 사용, 없으면 schedule 지역 중 랜덤 1개 선택
+     * 2. 카테고리 결정 - 랜덤 카테고리 옵션 적용 및 카테고리명 조회
+     * 3. 지역별 Tavily 웹 검색으로 장소 관련 웹 콘텐츠 수집
+     * 4. AI 1차 호출 - Tavily content에서 실제 장소명 추출
+     * 5. 추출된 장소명으로 Kakao 장소 검색하여 정확한 주소/URL 획득
+     * 6. AI 2차 호출 - 카카오 장소 목록에서 추천 장소 선정 + 한줄 소개 생성
+     * 7. 추천 장소 기반 응답 DTO 생성
+     *
+     * @param scheduleRegistReqDTO 일정 등록 요청 DTO (comment, 지역 리스트 등 포함)
+     * @param plan                 플랜 등록 요청 DTO (카테고리, 태그, 지역 등 포함)
+     * @return 생성된 플랜 응답 DTO
+     * @throws ScheduleException ErrorCode.REGION_NOT_FOUND           – plan과 schedule 모두 지역이 없을 때
+     * @throws ScheduleException ErrorCode.NOT_FOUND_CATEGORY         – 카테고리 번호 조회 실패 또는 카테고리명이 없을 때
+     * @throws ScheduleException ErrorCode.PLACE_SEARCH_EMPTY         – 장소 검색 결과가 없을 때
+     * @throws ScheduleException ErrorCode.AI_RECOMMENDATION_FAILED   – AI 추천 응답이 null일 때
+     */
     private PlanRegistResDTO handleAIPlan(ScheduleRegistReqDTO scheduleRegistReqDTO, PlanRegistReqDTO plan) {
-        // ---------- 1) 지역 번호로 x, y 좌표 검색 & Kakao 후보장소 수집(평탄화) ----------
-        if (plan.getRegionRegistReqDTOList() == null || plan.getRegionRegistReqDTOList().isEmpty()) {
-            logger.info("skip: plan has no regions. plan={}", plan);
-            return null;
-        }
 
-        int limitPlace = calLimitPlace(plan.getRegionRegistReqDTOList().size());
+        // ---------- 0) 지역 결정: plan 지역 우선, 없으면 schedule 지역에서 랜덤 ----------
+        List<RegionRegistReqDTO> resolvedRegions = resolveRegions(plan, scheduleRegistReqDTO);
 
-        List<List<KakaoPlaceResDTO>> allKakaoPlaceResults = new ArrayList<>();
+        int limitPlace = calLimitPlace(resolvedRegions.size());
+        int searchLimit = Math.min(limitPlace * 2, 10);    // Tavily 검색 건수
+        int extractLimit = Math.max(limitPlace * 2, 6);    // AI 장소명 추출 개수
 
-        // 랜덤 카테고리를 선택한 경우, 카테고리 번호를 랜덤으로 선택
-        if (plan.getIsRandomCategory().equals("Y")) {
+        // ---------- 1) 카테고리 결정 ----------
+        if ("Y".equals(plan.getIsRandomCategory())) {
+            Integer randomCategoryNum = categoryMapper.selectRandomCategoryNum();
+            if (randomCategoryNum == null) {
+                throw new ScheduleException(ErrorCode.NOT_FOUND_CATEGORY);
+            }
             plan = plan.toBuilder()
-                    .categoryNum(categoryMapper.selectRandomCategoryNum())
+                    .categoryNum(randomCategoryNum)
                     .build();
             logger.info("getCategoryNum={}", plan.getCategoryNum());
         }
 
         String categoryNm = categoryMapper.selectCategoryNmBy(plan.getCategoryNum());
-        String queryString = categoryNm;  // 검색어
+        if (categoryNm == null || categoryNm.isBlank()) {
+            throw new ScheduleException(ErrorCode.NOT_FOUND_CATEGORY);
+        }
 
-        String itemNm = itemMapper.selectItemNmBy(plan.getItemNum()); // todo. itemNm을 검색어로 쓸지 고려하기
+        String itemNm = itemMapper.selectItemNmBy(plan.getItemNum());
 
-        for (RegionRegistReqDTO region : plan.getRegionRegistReqDTOList()) {
-            // regionNum으로 좌표 가져오기
+        // 태그 정보 미리 조회 (장소명 추출 + 추천에서 모두 사용)
+        List<Integer> tagNums = Optional.ofNullable(plan.getPlanTagRegistReqDTOList())
+                .orElseGet(List::of)
+                .stream()
+                .map(TagRegistReqDTO::getTagNum)
+                .collect(Collectors.toList());
+
+        List<String> tagNames = tagQueryService.findTagNmByTagNum(tagNums);
+
+        // ---------- 2) Tavily 웹 검색 → AI 장소명 추출 → 카카오 상세 검색 ----------
+        List<KakaoPlaceResDTO> flatKakao = new ArrayList<>();
+
+        for (RegionRegistReqDTO region : resolvedRegions) {
             RegionGeoCodeResDTO geo = regionGeoCodeService.getGeocode(region.getRegionNum());
             if (geo == null) {
-                logger.warn("regionNum={} not found in DB, skip.", region.getRegionNum());
+                logger.warn("regionNum={} 좌표 조회 실패, skip.", region.getRegionNum());
                 continue;
             }
 
@@ -202,118 +278,103 @@ public class ScheduleCommandService {
                     .regionLevel4(geo.getRegionLevel4())
                     .build();
 
-            // 리스트 교체
-            int idx = plan.getRegionRegistReqDTOList().indexOf(region);
-            plan.getRegionRegistReqDTOList().set(idx, updatedRegion);
+            int idx = resolvedRegions.indexOf(region);
+            resolvedRegions.set(idx, updatedRegion);
 
-            // 지역명 결정 (레벨2/3 우선순위 적용)
-            String regionName = null;
-            if (updatedRegion.getRegionLevel3() != null && !updatedRegion.getRegionLevel3().isEmpty()) {
-                regionName = updatedRegion.getRegionLevel3();
-            } else if (updatedRegion.getRegionLevel2() != null && !updatedRegion.getRegionLevel2().isEmpty()) {
-                regionName = updatedRegion.getRegionLevel2();
+            String regionName = pickRegionName(updatedRegion);
+
+            // Step 1: Tavily 웹 검색 (태그도 검색어에 포함)
+            String tagKeyword = tagNames.isEmpty() ? "" : " " + tagNames.get(0);
+            String tavilyQuery = categoryNm + tagKeyword + " " + regionName + " 추천 장소";
+            List<TavilyResultDTO> tavilyResults = tavilyClient.search(tavilyQuery, searchLimit);
+
+            logger.info("tavily search: query={}, resultSize={}", tavilyQuery, tavilyResults.size());
+
+            if (tavilyResults.isEmpty()) {
+                logger.warn("Tavily 검색 결과 없음. query={}", tavilyQuery);
+                continue;
             }
 
-            List<KakaoPlaceResDTO> oneRegionPlaces =
-                    kakaoPlaceClient.searchKakaoPlace(queryString, geo.getX(), geo.getY(), radius, limitPlace);
-            allKakaoPlaceResults.add(oneRegionPlaces);
+            // Step 2: Tavily content를 합쳐서 AI에게 장소명 추출 요청
+            String combinedContent = tavilyResults.stream()
+                    .map(TavilyResultDTO::getContent)
+                    .filter(c -> c != null && !c.isBlank())
+                    .collect(Collectors.joining("\n"));
 
-            // 각 장소에 regionNum 세팅
-            if (oneRegionPlaces != null) {
-                oneRegionPlaces.forEach(k -> k.setRegionNum(region.getRegionNum()));
+            List<String> extractedPlaceNames = aiClient.extractPlaceNames(
+                    combinedContent, categoryNm, regionName, tagNames, extractLimit);
+
+            logger.info("AI 장소명 추출: category={}, region={}, extracted={}",
+                    categoryNm, regionName, extractedPlaceNames);
+
+            if (extractedPlaceNames == null || extractedPlaceNames.isEmpty()) {
+                logger.warn("AI 장소명 추출 결과 없음. category={}, region={}", categoryNm, regionName);
+                continue;
+            }
+
+            // Step 3: 추출된 장소명 → 카카오 검색 (매칭 성공한 것만 사용)
+            for (String placeName : extractedPlaceNames) {
+                KakaoPlaceResDTO matched = searchKakaoWithRetry(
+                        placeName, regionName, geo.getX(), geo.getY());
+
+                if (matched != null) {
+                    matched.setRegionNum(region.getRegionNum());
+                    flatKakao.add(matched);
+                    logger.info("카카오 매칭 성공: placeName={}, placeUrl={}",
+                            matched.getPlaceName(), matched.getPlaceUrl());
+                } else {
+                    logger.info("카카오 매칭 실패, skip. placeName={}", placeName);
+                }
             }
 
             logger.info("resolved regionName={} for regionNum={}", regionName, updatedRegion.getRegionNum());
-
         }
-
-        logger.info("allKakaoPlaceResults: {}", allKakaoPlaceResults);
-
-
-        // Kakao 평탄화(이 순서를 기준으로 이후 Naver/AI도 동일하게 맞춤)
-        List<KakaoPlaceResDTO> flatKakao = allKakaoPlaceResults.stream()
-                .filter(Objects::nonNull)
-                .flatMap(List::stream)
-                .collect(Collectors.toList());
 
         if (flatKakao.isEmpty()) {
-            logger.info("no kakao results. plan={}", plan);
-            return null;
+            throw new ScheduleException(ErrorCode.PLACE_SEARCH_EMPTY);
         }
 
-        // ---------- 2) Naver 블로그로 title/description 만들기 ----------
-        List<NaverBlogResDTO> allBlogsFlat = new ArrayList<>();
-        for (KakaoPlaceResDTO k : flatKakao) {
-            String query = k.getPlaceName() + " " + k.getRoadAddressName();
-            List<NaverBlogResDTO> blogs = naverBlogClient.searchNaverBlog(query, naverBlogDisplay);
-            if (blogs != null) {
-                allBlogsFlat.addAll(blogs);
-            }
-        }
-        logger.info("allNaverBlogResults.size={}", allBlogsFlat.size());
-
-        // AI placeList: Kakao 후보 1:1이 가장 안전하지만 현재는 blog기반으로 작성
-        // 블로그가 없을 때를 대비해서 Kakao 기본 설명을 fallback으로 변경
-        List<AIReqDTO> placeList = new ArrayList<>();
-        for (int i = 0; i < flatKakao.size(); i++) {
-            KakaoPlaceResDTO k = flatKakao.get(i);
-            // 대응되는 블로그가 없다면 간단한 설명을 생성(fallback)
-            String title = k.getPlaceName();
-            String desc  = Optional.ofNullable(k.getCategoryGroupName()).orElse("카테고리 정보 없음")
-                    + " · " + Optional.ofNullable(k.getRoadAddressName()).orElse(k.getAddressName());
-
-            // 블로그 결과가 있다면 맨 앞 하나만 사용(원한다면 점수화/요약 로직 확장)
-            if (i < allBlogsFlat.size()) {
-                NaverBlogResDTO b = allBlogsFlat.get(i);
-                title = stripHtml(b.getTitle());
-                desc  = stripHtml(b.getDescription());
-            }
-
-            placeList.add(AIReqDTO.builder()
-                    .title(title)
-                    .description(desc)
-                    .build());
-        }
-
-        // ---------- 3) AI 호출 ----------
-        // todo. 일정 전체에 대한 태그(schedulePlanTagRegistReqDTOList)도 참고하도록 수정해야 함
-        List<Integer> tagNums = Optional.ofNullable(plan.getPlanTagRegistReqDTOList())
-                .orElseGet(List::of)
-                .stream()
-                .map(TagRegistReqDTO::getTagNum)
+        // ---------- 3) AI 2차 호출: 추천 장소 선정 + 한줄 소개 ----------
+        List<AIReqDTO> placeList = flatKakao.stream()
+                .map(k -> AIReqDTO.builder()
+                        .title(k.getPlaceName())
+                        .description(
+                                "카테고리: " + Optional.ofNullable(k.getCategoryGroupName()).orElse(categoryNm)
+                                        + " / 주소: " + Optional.ofNullable(k.getRoadAddressName())
+                                        .orElse(Optional.ofNullable(k.getAddressName()).orElse("주소 없음")))
+                        .build())
                 .collect(Collectors.toList());
-
-        List<String> tagNames = tagQueryService.findTagNmByTagNum(tagNums);
 
         AIReqWrapper aiReqWrapper = AIReqWrapper.builder()
                 .tags(tagNames)
                 .comment(Optional.ofNullable(scheduleRegistReqDTO.getComment()).orElse(""))
+                .category(categoryNm)
                 .placeList(placeList)
                 .build();
 
         AIResDTO aiRes = aiClient.recommandPlace(aiReqWrapper);
 
-        // ---------- 4) AI가 고른 index → Kakao place 선택 ----------
-        Integer idx = (aiRes != null) ? aiRes.getRecommandPlaceIndex() : null;
-        if (idx == null || idx < 0 || idx >= flatKakao.size()) {
-            idx = 0; // fallback
+
+        // ---------- 4) AI가 고른 index → place 선택 ----------
+        int chosenIdx = (aiRes == null) ? -1 : aiRes.getRecommandPlaceIndex();
+        if (chosenIdx < 0 || chosenIdx >= flatKakao.size()) {
+            logger.warn("AI 추천 사용 불가(aiRes={}, idx={}, candidates={}), fallback=0",
+                    aiRes != null, chosenIdx, flatKakao.size());
+            chosenIdx = 0;
         }
-        KakaoPlaceResDTO aiChosen = flatKakao.get(idx);
+        KakaoPlaceResDTO aiChosen = flatKakao.get(chosenIdx);
 
         // ---------- 5) 응답 DTO 생성 ----------
-        String regionNm = null;
-        if (aiChosen.getRegionNum() != null) {
-            regionNm = regionRepository.findById(aiChosen.getRegionNum())
-                    .map(region -> {
-                        // 지역명은 보통 3레벨 > 2레벨 순으로 선택
-                        if (region.getRegionLevel3() != null && !region.getRegionLevel3().isEmpty())
-                            return region.getRegionLevel3();
-                        else if (region.getRegionLevel2() != null && !region.getRegionLevel2().isEmpty())
-                            return region.getRegionLevel2();
-                        else
-                            return region.getRegionLevel1();
-                    })
-                    .orElse(null);
+        String regionNm = resolveRegionNm(aiChosen.getRegionNum());
+
+        // OG 이미지 추출
+        String imageUrl = null;
+        if (aiChosen.getPlaceUrl() != null && !aiChosen.getPlaceUrl().isBlank()) {
+            try {
+                imageUrl = scheduleQueryService.extractOgImage(aiChosen.getPlaceUrl());
+            } catch (Exception e) {
+                logger.warn("일정 생성 OG 이미지 추출 실패: {}", aiChosen.getPlaceUrl());
+            }
         }
 
         return PlanRegistResDTO.builder()
@@ -322,6 +383,7 @@ public class ScheduleCommandService {
                 .endTime(plan.getEndTime())
                 .planNm(aiChosen.getPlaceName())
                 .planLink(aiChosen.getPlaceUrl())
+                .imageUrl(imageUrl)
                 .planDescription(aiRes != null ? aiRes.getAiDescription() : null)
                 .planAddress(Optional.ofNullable(aiChosen.getRoadAddressName()).orElse(aiChosen.getAddressName()))
                 .regionNm(regionNm)
@@ -334,16 +396,86 @@ public class ScheduleCommandService {
                         Optional.ofNullable(plan.getPlanTagRegistReqDTOList())
                                 .orElseGet(List::of)
                                 .stream()
-                                .map(tagReq -> TagRegistResDTO.builder()
-                                        .tagNum(tagReq.getTagNum())
-                                        .tagNm(tagReq.getTagNm())
-                                        .build())
+                                .map(tagReq -> {
+                                    TagDetailVO tagDetail = tagQueryService.findTagByTagNum(tagReq.getTagNum());
+                                    return TagRegistResDTO.builder()
+                                            .tagNum(tagReq.getTagNum())
+                                            .tagNm(tagDetail != null ? tagDetail.getTagNm() : null)
+                                            .build();
+                                })
                                 .collect(Collectors.toList())
                 )
-                // .aiChosen(aiChosen)
                 .build();
     }
 
+
+    /**
+     * 카카오 장소 검색 (재시도 포함)
+     * 1차: "장소명 + 지역명" 으로 검색
+     * 2차: "장소명"만으로 재검색
+     * 3차: "장소명 + 지역명"으로 검색하되 좌표/반경 없이 (즉, 전국 검색)
+     * 둘 다 실패 시 null 반환
+     */
+    private KakaoPlaceResDTO searchKakaoWithRetry(String placeName, String regionName, String x, String y) {
+        // 1차: 장소명 + 지역명 (좌표 기반)
+        String query1 = placeName + " " + regionName;
+        List<KakaoPlaceResDTO> results = kakaoPlaceClient.searchKakaoPlace(query1, x, y, radius, 1);
+        logger.info("kakao 1차: query={}, resultSize={}", query1, results != null ? results.size() : "null");
+        if (results != null && !results.isEmpty()) return results.get(0);
+
+        // 2차: 장소명만 (좌표 기반)
+        List<KakaoPlaceResDTO> retry = kakaoPlaceClient.searchKakaoPlace(placeName, x, y, radius, 1);
+        logger.info("kakao 2차: query={}, resultSize={}", placeName, retry != null ? retry.size() : "null");
+        if (retry != null && !retry.isEmpty()) return retry.get(0);
+
+        // 3차: 장소명 + 지역명 (좌표/반경 없이)
+        List<KakaoPlaceResDTO> fallback = kakaoPlaceClient.searchKakaoPlace(query1, null, null, 0, 1);
+        logger.info("kakao 3차(좌표 없음): query={}, resultSize={}", query1, fallback != null ? fallback.size() : "null");
+        if (fallback != null && !fallback.isEmpty()) return fallback.get(0);
+
+        return null;
+    }
+
+
+    private List<RegionRegistReqDTO> resolveRegions(PlanRegistReqDTO plan, ScheduleRegistReqDTO schedule) {
+        if (plan.getRegionRegistReqDTOList() != null && !plan.getRegionRegistReqDTOList().isEmpty()) {
+            logger.info("plan 자체 지역 사용. size={}", plan.getRegionRegistReqDTOList().size());
+            return plan.getRegionRegistReqDTOList();
+        }
+
+        List<RegionRegistReqDTO> scheduleRegions = schedule.getScheduleRegionRegistReqDTOList();
+        if (scheduleRegions == null || scheduleRegions.isEmpty()) {
+            throw new ScheduleException(ErrorCode.REGION_NOT_FOUND);
+        }
+
+        RegionRegistReqDTO randomRegion = scheduleRegions.get(
+                ThreadLocalRandom.current().nextInt(scheduleRegions.size())
+        );
+        logger.info("schedule 지역에서 랜덤 선택. regionNum={}", randomRegion.getRegionNum());
+
+        return new ArrayList<>(List.of(randomRegion));
+    }
+
+    private String pickRegionName(RegionRegistReqDTO region) {
+        if (region.getRegionLevel3() != null && !region.getRegionLevel3().isEmpty())
+            return region.getRegionLevel3();
+        if (region.getRegionLevel2() != null && !region.getRegionLevel2().isEmpty())
+            return region.getRegionLevel2();
+        return region.getRegionLevel1();
+    }
+
+    private String resolveRegionNm(Integer regionNum) {
+        if (regionNum == null) return null;
+        return regionRepository.findById(regionNum)
+                .map(region -> {
+                    if (region.getRegionLevel3() != null && !region.getRegionLevel3().isEmpty())
+                        return region.getRegionLevel3();
+                    if (region.getRegionLevel2() != null && !region.getRegionLevel2().isEmpty())
+                        return region.getRegionLevel2();
+                    return region.getRegionLevel1();
+                })
+                .orElse(null);
+    }
 
     private PlanRegistResDTO handleUserPlan(PlanRegistReqDTO plan) {
 
@@ -355,6 +487,16 @@ public class ScheduleCommandService {
             RegionDetailVO regionDetailVO = regionQueryService.getRegionNumByAddress(userAddedPlaceDTO.getAddressName());
             String regionNm = resolveRegionName(regionDetailVO);
 
+            // OG 이미지 추출
+            String imageUrl = null;
+            if (userAddedPlaceDTO.getPlaceUrl() != null && !userAddedPlaceDTO.getPlaceUrl().isBlank()) {
+                try {
+                    imageUrl = scheduleQueryService.extractOgImage(userAddedPlaceDTO.getPlaceUrl());
+                } catch (Exception e) {
+                    logger.warn("사용자 플랜 OG 이미지 추출 실패: {}", userAddedPlaceDTO.getPlaceUrl());
+                }
+            }
+
             logger.info("사용자가 선택한 장소 userAddedPlaceDTO addressName={}, resolved regionNum={}", userAddedPlaceDTO.getAddressName(), regionDetailVO.getRegionNum());
 
             return PlanRegistResDTO.builder()
@@ -363,6 +505,7 @@ public class ScheduleCommandService {
                     .endTime(plan.getEndTime())
                     .planNm(userAddedPlaceDTO.getPlaceName())
                     .planLink(userAddedPlaceDTO.getPlaceUrl())
+                    .imageUrl(imageUrl)
                     .planDescription(null) // 사용자가 추가한 일정은 설명 없음
                     .planAddress(userAddedPlaceDTO.getAddressName())
                     .regionNum(regionDetailVO.getRegionNum()) //todo. check
@@ -372,42 +515,69 @@ public class ScheduleCommandService {
                     .itemNum(plan.getItemNum())
                     .itemNm(itemMapper.selectItemNmBy(plan.getItemNum()))
                     .planTagRegistResDTOList(List.of()) // 사용자 일정은 태그 없음
+                    .planMemo(plan.getPlanMemo())
                     .build();
         } else {
 
             // CASE 2: 텍스트로 직접 입력한 경우
             logger.info("➜ A-2. 사용자가 직접 입력한 플랜 plan={}", plan);
 
-            RegionDetailVO region = regionQueryService.getRegionByRegionNum(plan.getRegionRegistReqDTOList().get(0).getRegionNum());
+            String regionNm = null;
+            int regionNum = 0;
+
+            if (plan.getRegionRegistReqDTOList() != null && !plan.getRegionRegistReqDTOList().isEmpty()) {
+                regionNum = plan.getRegionRegistReqDTOList().get(0).getRegionNum();
+                RegionDetailVO region = regionQueryService.getRegionByRegionNum(regionNum);
+                regionNm = region.getRegionLevel3() != null ? region.getRegionLevel3() : region.getRegionLevel2();
+            }
 
             return PlanRegistResDTO.builder()
                     .planSource(PLAN_SOURCE.USER_CUSTOM)
                     .startTime(plan.getStartTime())
                     .endTime(plan.getEndTime())
                     .planNm(plan.getPlanNm())
+                    .planDescription(plan.getPlanDescription())
                     .planAddress(null)
                     .planLink(null)
                     .categoryNum(plan.getCategoryNum())
                     .categoryNm(categoryMapper.selectCategoryNmBy(plan.getCategoryNum()))
                     .itemNum(plan.getItemNum())
                     .itemNm(itemMapper.selectItemNmBy(plan.getItemNum()))
-                    .regionNum(plan.getRegionRegistReqDTOList().get(0).getRegionNum())
-                    .regionNm(region.getRegionLevel3() != null ? region.getRegionLevel3() : region.getRegionLevel2())
-                    .planTagRegistResDTOList(List.of()) // 사용자 입력은 태그 없음
+                    .regionNum(regionNum)
+                    .regionNm(regionNm)
+                    .planTagRegistResDTOList(List.of())
+                    .planMemo(plan.getPlanMemo())
                     .build();
         }
 
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public Integer saveSchedule(ScheduleRegistResDTO scheduleRegistResDTO, String membershipNo) {
+    public ApiResponse saveSchedule(ScheduleRegistResDTO scheduleRegistResDTO, HttpServletRequest request) {
+
+        // 1. API SECRET KEY 검증
+        if (!validator.apiSecretKeyCheck(request.getHeader("API-KEY"))) {
+            return ApiResponse.error(ErrorCode.NOT_EQUAL_API_SECRET_KEY.getCode(), ErrorCode.NOT_EQUAL_API_SECRET_KEY.getMessage());
+        }
+
+        // 2. 회원번호 조회
+        Map<String, Object> membershipInfo = membershipUtil.membershipNoService(request);
+        if (!membershipInfo.get("resultCode").equals("A200")) {
+            return ApiResponse.error(ErrorCode.NOT_EXIST_ACCESS_AUTH.getCode(), ErrorCode.NOT_EXIST_ACCESS_AUTH.getMessage());
+        }
+        String membershipNo = String.valueOf(membershipInfo.get("membershipNo"));
+
+        // todo. 날짜 형식 검증 필요
+
         logger.info("START DB SAVE!");
+
         // 1. Schedule
         Schedule schedule = Schedule.builder()
                 .membershipNo(membershipNo)
                 .scheduleNm(scheduleRegistResDTO.getScheduleNm())
                 .startDate(scheduleRegistResDTO.getStartDate())
                 .endDate(scheduleRegistResDTO.getEndDate())
+                .scheduleMemo(scheduleRegistResDTO.getScheduleMemo())
                 .radius(radius)
                 .delYn("N")
                 .build();
@@ -421,7 +591,7 @@ public class ScheduleCommandService {
 
             for (TagRegistResDTO tagReq : scheduleRegistResDTO.getScheduleTagRegistResDTOList()) {
                 Tag tag = tagRepository.findById(tagReq.getTagNum())
-                        .orElseThrow(() -> new BasicException(ErrorCode.TAG_NOT_FOUND));
+                        .orElseThrow(() -> new BasicException(ErrorCode.NOT_FOUND_TAG));
 
                 scheduleTagRepository.save(
                         ScheduleTag.builder()
@@ -441,8 +611,11 @@ public class ScheduleCommandService {
 
             PlanRegistResDTO planRes = scheduleRegistResDTO.getPlanRegistResDTOList().get(i);
 
-            Item item = itemRepository.findById(planRes.getItemNum())
-                    .orElseThrow(() -> new BasicException(ErrorCode.ITEM_NOT_FOUND));
+            Item item = null;
+            if (planRes.getItemNum() != 0) {
+                item = itemRepository.findById(planRes.getItemNum())
+                        .orElseThrow(() -> new BasicException(ErrorCode.NOT_FOUND_ITEM));
+            }
 
             PlanUserMembershipInfo user = PlanUserMembershipInfo.builder()
                     .membershipNo(membershipNo)
@@ -461,6 +634,8 @@ public class ScheduleCommandService {
                     .user(user)
                     .item(item)
                     .delYn("N")
+                    .planSource(String.valueOf(planRes.getPlanSource()))
+                    .planMemo(planRes.getPlanMemo())
                     .build();
 
             planRepository.saveAndFlush(plan);
@@ -472,7 +647,7 @@ public class ScheduleCommandService {
 
                 for (TagRegistResDTO tagRes : planRes.getPlanTagRegistResDTOList()) {
                     Tag tag = tagRepository.findById(tagRes.getTagNum())
-                            .orElseThrow(() -> new BasicException(ErrorCode.TAG_NOT_FOUND));
+                            .orElseThrow(() -> new BasicException(ErrorCode.NOT_FOUND_TAG));
 
                     PlanTag planTag = PlanTag.builder()
                             .id(new PlanTagId(tag.getTagNum(), plan.getPlanNum()))
@@ -485,9 +660,9 @@ public class ScheduleCommandService {
             }
 
             // 3-3. Plan_region
-            if (planRes.getRegionNum() != null) {
+            if (planRes.getRegionNum() != null && planRes.getRegionNum() != 0) {
                 Region region = regionRepository.findById(planRes.getRegionNum())
-                        .orElseThrow(() -> new BasicException(ErrorCode.REGION_NOT_FOUND));
+                        .orElseThrow(() -> new BasicException(ErrorCode.NOT_FOUND_REGION));
 
                 PlanRegionId planRegionId = new PlanRegionId(plan.getPlanNum(), region.getRegionNum());
 
@@ -503,9 +678,9 @@ public class ScheduleCommandService {
             }
 
             // 3-4. Place
-            if (planRes.getRegionNum() != null) {
+            if (planRes.getRegionNum() != null && planRes.getRegionNum() != 0) {
                 Region region = regionRepository.findById(planRes.getRegionNum())
-                        .orElseThrow(() -> new BasicException(ErrorCode.REGION_NOT_FOUND));
+                        .orElseThrow(() -> new BasicException(ErrorCode.NOT_FOUND_REGION));
 
                 Place place = Place.builder()
                         .region(region)
@@ -520,133 +695,192 @@ public class ScheduleCommandService {
                 logger.info("Place save! planNum={}, regionNum={}", plan.getPlanNum(), planRes.getRegionNum());
 
                 // 3-5. plan-place 동기화
-                plan.toBuilder().place(place).build();
+                plan = plan.toBuilder().place(place).build();
+                planRepository.save(plan);
             }
 
         }
         logger.info("END DB SAVE!");
 
-        return schedule.getScheduleNum();
-
-    }
-
-
-    @Transactional
-    public boolean deleteSchedule(Integer scheduleNum, String membershipNo) {
-        Optional<Schedule> optional = scheduleRepository.findByScheduleNumAndMembershipNo(scheduleNum, membershipNo);
-        if (optional.isPresent()) {
-            Schedule schedule = optional.get();
-            schedule.markDeleted();  // del_yn=Y로 변경
-            return true;  // 트랜잭션 커밋 시 자동 UPDATE
-        }
-        throw new BasicException(ErrorCode.SCHEDULE_NOT_FOUND);
+        return ApiResponse.resultData(
+                schedule.getScheduleNum(),
+                ErrorCode.SUCCESS_SCHEDULE_SAVE.getCode(),
+                ErrorCode.SUCCESS_SCHEDULE_SAVE.getMessage());
     }
 
     @Transactional
-    public boolean updateSchedule(ScheduleRegistResDTO dto) {
-
-        // 1) Schedule 조회
-        Schedule schedule = scheduleRepository.findById(String.valueOf(dto.getScheduleNum()))
-                .orElseThrow(() -> new BasicException(ErrorCode.SCHEDULE_NOT_FOUND));
-
-        // 2) Schedule 기본 정보 업데이트
-        schedule.updateBasicInfo(
-                dto.getScheduleNm(),
-                dto.getStartDate(),
-                dto.getEndDate()
-        );
-
-        // 3) ScheduleTag 전체 삭제 후 재등록
-        scheduleTagRepository.deleteBySchedule(schedule);
-
-        if (dto.getScheduleTagRegistResDTOList() != null) {
-            for (TagRegistResDTO tagReq : dto.getScheduleTagRegistResDTOList()) {
-                Tag tag = tagRepository.findById(tagReq.getTagNum())
-                        .orElseThrow(() -> new BasicException(ErrorCode.TAG_NOT_FOUND));
-
-                scheduleTagRepository.save(
-                        ScheduleTag.builder()
-                                .id(new ScheduleTagId(tag.getTagNum(), schedule.getScheduleNum()))
-                                .schedule(schedule)
-                                .tag(tag)
-                                .build()
-                );
+    public ApiResponse updateSchedule(ScheduleRegistResDTO dto, HttpServletRequest request) {
+        try {
+            // 1. API SECRET KEY 검증
+            if (!validator.apiSecretKeyCheck(request.getHeader("API-KEY"))) {
+                return ApiResponse.error(ErrorCode.NOT_EQUAL_API_SECRET_KEY.getCode(), ErrorCode.NOT_EQUAL_API_SECRET_KEY.getMessage());
             }
-        }
 
-        // 4) 기존 Plan은 soft delete 처리
-        List<Plan> oldPlans = planRepository.findBySchedule(schedule);
-        for (Plan p : oldPlans) {
-            p.markDeleted();
-        }
+            // 2. 회원번호 조회
+            Map<String, Object> membershipInfo = membershipUtil.membershipNoService(request);
+            if (!membershipInfo.get("resultCode").equals("A200")) {
+                return ApiResponse.error(ErrorCode.NOT_EXIST_ACCESS_AUTH.getCode(), ErrorCode.NOT_EXIST_ACCESS_AUTH.getMessage());
+            }
+            String membershipNo = String.valueOf(membershipInfo.get("membershipNo"));
 
-        // 5) 새 Plan + PlanTag + PlanRegion + Place 저장
-        if (dto.getPlanRegistResDTOList() != null) {
+            // 3. Schedule 조회
+            Schedule schedule = scheduleRepository.findByScheduleNumAndMembershipNo(dto.getScheduleNum(), membershipNo)
+                    .orElseThrow(() -> new BasicException(ErrorCode.NOT_FOUND_INFO_SCHEDULE));
 
-            for (PlanRegistResDTO planRes : dto.getPlanRegistResDTOList()) {
+            // 4. Schedule 기본 정보 업데이트
+            schedule.updateBasicInfo(
+                    dto.getScheduleNm(),
+                    dto.getStartDate(),
+                    dto.getEndDate(),
+                    dto.getScheduleMemo() != null && dto.getScheduleMemo().isEmpty() ? null : dto.getScheduleMemo() // 빈 문자열은 null로 처리
+            );
 
-                Item item = itemRepository.findById(planRes.getItemNum())
-                        .orElseThrow(() -> new BasicException(ErrorCode.ITEM_NOT_FOUND));
+            // 5. ScheduleTag 전체 삭제 후 재등록
+            scheduleTagRepository.deleteBySchedule(schedule);
 
-                PlanUserMembershipInfo user = PlanUserMembershipInfo.builder()
-                        .membershipNo("1")
-                        .build();
+            if (dto.getScheduleTagRegistResDTOList() != null) {
+                for (TagRegistResDTO tagReq : dto.getScheduleTagRegistResDTOList()) {
+                    Tag tag = tagRepository.findById(tagReq.getTagNum())
+                            .orElseThrow(() -> new BasicException(ErrorCode.NOT_FOUND_TAG));
 
-                // 새 Plan 생성
-                Plan plan = Plan.builder()
-                        .planNm(planRes.getPlanNm())
-                        .startTime(planRes.getStartTime())
-                        .endTime(planRes.getEndTime())
-                        .planLink(planRes.getPlanLink())
-                        .planDescription(planRes.getPlanDescription())
-                        .planAddress(planRes.getPlanAddress())
-                        .schedule(schedule)
-                        .user(user)
-                        .item(item)
-                        .delYn("N")
-                        .build();
-
-                planRepository.save(plan);
-
-                // PlanTag 저장
-                if (planRes.getPlanTagRegistResDTOList() != null) {
-                    for (TagRegistResDTO tagRes : planRes.getPlanTagRegistResDTOList()) {
-                        Tag tag = tagRepository.findById(tagRes.getTagNum())
-                                .orElseThrow(() -> new BasicException(ErrorCode.TAG_NOT_FOUND));
-
-                        planTagRepository.save(
-                                new PlanTag(new PlanTagId(tag.getTagNum(), plan.getPlanNum()), plan, tag)
-                        );
-                    }
+                    scheduleTagRepository.save(
+                            ScheduleTag.builder()
+                                    .id(new ScheduleTagId(tag.getTagNum(), schedule.getScheduleNum()))
+                                    .schedule(schedule)
+                                    .membershipNo(membershipNo)
+                                    .tag(tag)
+                                    .build()
+                    );
                 }
+            }
 
-                // PlanRegion + Place 저장
-                if (planRes.getRegionNum() != null) {
-                    Region region = regionRepository.findById(planRes.getRegionNum())
-                            .orElseThrow(() -> new BasicException(ErrorCode.REGION_NOT_FOUND));
+            // 6. 기존 Plan 정보를 Map으로 보관 후 soft delete
+            List<Plan> oldPlans = planRepository.findBySchedule(schedule);
 
-                    // PlanRegion
-                    PlanRegionId regionId = new PlanRegionId(plan.getPlanNum(), region.getRegionNum());
-                    planRegionRepository.save(new PlanRegion(regionId, plan, region));
+            Map<Integer, Plan> oldPlanMap = oldPlans.stream()
+                    .filter(p -> p.getPlanNum() != null)
+                    .collect(Collectors.toMap(Plan::getPlanNum, p -> p));
 
-                    // Place
-                    Place place = Place.builder()
-                            .region(region)
-                            .regionNm(region.getRegionLevel3() != null ? region.getRegionLevel3() : region.getRegionLevel2())
-                            .address(planRes.getPlanAddress())
-                            .planLink(planRes.getPlanLink())
-                            .placeDescription(planRes.getPlanDescription())
-                            .plan(plan)
+            for (Plan p : oldPlans) {
+                p.markDeleted();
+            }
+
+            // 7. 새 Plan + PlanTag + PlanRegion + Place 저장
+            if (dto.getPlanRegistResDTOList() != null) {
+
+                for (PlanRegistResDTO planRes : dto.getPlanRegistResDTOList()) {
+
+                    // 기존 Plan에서 값 fallback
+                    Plan oldPlan = planRes.getPlanNum() != null ? oldPlanMap.get(planRes.getPlanNum()) : null;
+
+                    String description = planRes.getPlanDescription() != null
+                            ? planRes.getPlanDescription()
+                            : (oldPlan != null ? oldPlan.getPlanDescription() : "");
+
+                    String address = planRes.getPlanAddress() != null
+                            ? planRes.getPlanAddress()
+                            : (oldPlan != null ? oldPlan.getPlanAddress() : "");
+
+                    logger.info("!! description={}, address={}, planLink={}", description, address, planRes.getPlanLink());
+                    Item item = null;
+                    if (!"Y".equals(planRes.getIsUserAdded())) {
+                        item = itemRepository.findById(planRes.getItemNum())
+                                .orElseThrow(() -> new BasicException(ErrorCode.NOT_FOUND_ITEM));
+                    }
+
+                    PlanUserMembershipInfo user = PlanUserMembershipInfo.builder()
+                            .membershipNo(membershipNo)
                             .build();
 
-                    placeRepository.save(place);
+                    Plan plan = Plan.builder()
+                            .planNm(planRes.getPlanNm())
+                            .startTime(planRes.getStartTime())
+                            .endTime(planRes.getEndTime())
+                            .planLink(planRes.getPlanLink())
+                            .planDescription(description)
+                            .planAddress(address)
+                            .schedule(schedule)
+                            .user(user)
+                            .item(item)
+                            .delYn("N")
+                            .planMemo(planRes.getPlanMemo())
+                            .build();
+
+                    planRepository.save(plan);
+
+                    // PlanTag 저장
+                    if (planRes.getPlanTagRegistResDTOList() != null) {
+                        for (TagRegistResDTO tagRes : planRes.getPlanTagRegistResDTOList()) {
+                            Tag tag = tagRepository.findById(tagRes.getTagNum())
+                                    .orElseThrow(() -> new BasicException(ErrorCode.NOT_FOUND_TAG));
+
+                            planTagRepository.save(new PlanTag(new PlanTagId(tag.getTagNum(), plan.getPlanNum()), plan, tag));
+                        }
+                    }
+
+                    // PlanRegion + Place 저장
+                    if (planRes.getRegionNum() != null) {
+                        Region region = regionRepository.findById(planRes.getRegionNum())
+                                .orElseThrow(() -> new BasicException(ErrorCode.NOT_FOUND_REGION));
+
+                        planRegionRepository.save(new PlanRegion(new PlanRegionId(plan.getPlanNum(), region.getRegionNum()), plan, region));
+
+                        Place place = Place.builder()
+                                .region(region)
+                                .regionNm(region.getRegionLevel3() != null ? region.getRegionLevel3() : region.getRegionLevel2())
+                                .address(address)
+                                .planLink(planRes.getPlanLink())
+                                .placeDescription(description)
+                                .plan(plan)
+                                .build();
+
+                        placeRepository.save(place);
+                    }
                 }
             }
-        }
 
-        return true;
+            return ApiResponse.success(true, "일정 수정 성공");
+
+        } catch (BasicException e) {
+            logger.error("일정 수정 실패 - BasicException: {}, Code: {}", e.getMessage(), e.getCode());
+            return ApiResponse.error(e.getCode(), e.getMessage());
+        } catch (Exception e) {
+            logger.error("일정 수정 실패 - Unexpected Exception", e);
+            return ApiResponse.error(ErrorCode.INTERNAL_ERROR.getCode(), ErrorCode.INTERNAL_ERROR.getMessage());
+        }
     }
 
+    @Transactional
+    public ApiResponse deleteSchedule(Integer scheduleNum, HttpServletRequest request) {
+
+        // 1. API SECRET KEY 검증
+        if (!validator.apiSecretKeyCheck(request.getHeader("API-KEY"))) {
+            throw new BasicException(ErrorCode.NOT_EQUAL_API_SECRET_KEY);
+        }
+
+        // 2. 회원번호 조회
+        Map<String, Object> membershipInfo = membershipUtil.membershipNoService(request);
+        if (!membershipInfo.get("resultCode").equals("A200")) {
+            throw new BasicException(ErrorCode.NOT_EXIST_ACCESS_AUTH);
+        }
+        String membershipNo = String.valueOf(membershipInfo.get("membershipNo"));
+
+        // 3. 일정 조회 및 삭제
+        Schedule schedule = scheduleRepository.findByScheduleNumAndMembershipNo(scheduleNum, membershipNo)
+                .orElseThrow(() -> new BasicException(ErrorCode.NOT_FOUND_INFO_SCHEDULE));
+
+        schedule.markDeleted();
+
+        // 4. 관련 Plan들도 soft delete
+        List<Plan> plans = planRepository.findBySchedule(schedule);
+        for (Plan plan : plans) {
+            plan.markDeleted();
+        }
+        return ApiResponse.resultData(
+                null,
+                ErrorCode.SUCCESS_SCHEDULE_DELETE.getCode(),
+                ErrorCode.SUCCESS_SCHEDULE_DELETE.getMessage());
+    }
 
     // 후보지역 수에 따라 각 지역의 후보장소 수를 리턴
     // 후보장소 수만큼 네이버 블로그 API를 호출해야 하기 때문에 제한 필요
@@ -671,11 +905,4 @@ public class ScheduleCommandService {
             return region.getRegionLevel1();
         }
     }
-
-//    private String firstRegionName(List<RegionRegistReqDTO> regions) {
-//        if (regions == null || regions.isEmpty()) return null;
-//        // RegionRegistReqDTO에 regionName 같은 필드가 있다면 그걸 반환
-//        // 예시로 cityName+district 조합 등을 사용
-//        return Optional.ofNullable(regions.get(0).getRegionName()).orElse(null);
-//    }
 }

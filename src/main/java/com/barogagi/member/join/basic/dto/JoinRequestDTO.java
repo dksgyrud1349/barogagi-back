@@ -1,12 +1,14 @@
 package com.barogagi.member.join.basic.dto;
 
-import com.barogagi.config.vo.DefaultVO;
+import com.barogagi.terms.dto.TermsDTO;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import lombok.Getter;
 import lombok.Setter;
 
 @Getter
 @Setter
-public class JoinRequestDTO extends DefaultVO {
+public class JoinRequestDTO {
 
     // 아이디
     private String userId = "";
@@ -24,11 +26,20 @@ public class JoinRequestDTO extends DefaultVO {
     private String tel = "";
 
     // 성별 (M : 남 / W : 여)
-    private String gender = "";
+    @Enumerated(EnumType.STRING)
+    private Gender gender;
 
     // 닉네임
     private String nickName = "";
 
     // 회원가입 종류
     private String joinType = "BASIC";
+
+    // 선호 지역의 지역코드
+    private String areaCd = "";
+
+    // 선호 지역의 시군구코드
+    private String sigunguCd = "";
+
+    private TermsDTO termsDTO;
 }

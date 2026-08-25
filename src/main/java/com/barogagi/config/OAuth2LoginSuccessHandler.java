@@ -1,13 +1,16 @@
 package com.barogagi.config;
 
+import com.barogagi.member.domain.UserMembershipInfo;
 import com.barogagi.member.login.dto.LoginResponse;
+import com.barogagi.member.login.exception.LoginException;
 import com.barogagi.member.login.service.AuthService;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.barogagi.member.repository.UserMembershipRepository;
+import com.barogagi.redirect.RedirectService;
+import com.barogagi.setting.service.SettingService;
+import com.barogagi.util.exception.ErrorCode;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.oauth2.client.authentication.OAuth2AuthenticationToken;
 import org.springframework.security.web.authentication.AuthenticationSuccessHandler;
@@ -20,38 +23,80 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class OAuth2LoginSuccessHandler implements AuthenticationSuccessHandler {
 
-    Logger logger = LoggerFactory.getLogger(OAuth2LoginSuccessHandler.class);
-
     private final AuthService authService;
-    private final ObjectMapper objectMapper;
+    private final RedirectService redirectService;
+    private final SettingService settingService;
+
+    private final UserMembershipRepository userMembershipRepository;
 
     @Override
     public void onAuthenticationSuccess(HttpServletRequest req, HttpServletResponse res,
                                         Authentication authentication) throws IOException {
-        var token = (OAuth2AuthenticationToken) authentication;
-        var attrs = token.getPrincipal().getAttributes();
 
-        String extId = String.valueOf(attrs.getOrDefault("sub", attrs.get("id")));
-        String userId = extId;
+        OAuth2AuthenticationToken token = (OAuth2AuthenticationToken) authentication;
+        Map<String, Object> attrs = token.getPrincipal().getAttributes();
 
-        logger.info("extId={}", extId);
-        logger.info("userId={}", userId);
+        String userId = extractUserId(attrs);
 
-        // successHandler 내부 예시
-        LoginResponse login = authService.loginAfterSignup(userId, "web-oauth");
+        // OAuth 인증 요청에 저장해 둔 deviceId 가져오기
+        String deviceId = (String) req.getAttribute("oauth2.deviceId");
 
-        res.setContentType("application/json;charset=UTF-8");
-        objectMapper.writeValue(res.getWriter(), Map.of(
+        if (deviceId == null || deviceId.isBlank()) {
+            throw new LoginException(ErrorCode.FAIL_REFRESH_TOKEN);
+        }
+
+        LoginResponse login = authService.loginAfterSignup(userId, deviceId);
+
+        String nickname = "";
+        if("R200".equals(login.tokens().resultCode())) {
+            UserMembershipInfo user = userMembershipRepository.findById(login.membershipNo()).orElse(null);
+            nickname = (user == null || user.getNickName() == null) ? "" : user.getNickName();
+        }
+
+        // 프론트로 redirect + 데이터 전달
+        Map<String, Object> redirectUrlMap = Map.of(
                 "resultCode", login.tokens().resultCode(),
                 "message", login.tokens().message(),
                 "accessToken", login.tokens().accessToken(),
                 "accessTokenExpiresIn", login.tokens().accessTokenExpiresIn(),
-                "userId", userId,
                 "membershipNo", login.membershipNo(),
                 "refreshToken", login.tokens().refreshToken(),
-                "refreshTokenExpiresIn", login.tokens().refreshTokenExpiresIn()
-        ));
+                "refreshTokenExpiresIn", login.tokens().refreshTokenExpiresIn(),
+                "nickname", nickname,
+                "deviceId", login.deviceId()
+        );
 
+        // 설정 값 기본 세팅
+        settingService.basicSetting(login.membershipNo());
+
+        String redirectUrl = redirectService.successOAuthRedirectUrl(redirectUrlMap);
+      
+        res.sendRedirect(redirectUrl);
+    }
+
+    private String extractUserId(Map<String, Object> attrs) {
+        // 1. Google
+        Object sub = attrs.get("sub");
+        if (sub != null && !sub.toString().isBlank()) {
+            return sub.toString();
+        }
+
+        // 2. Kakao
+        Object id = attrs.get("id");
+        if (id != null && !id.toString().isBlank()) {
+            return id.toString();
+        }
+
+        // 3. Naver (response 내부)
+        Object response = attrs.get("response");
+        if (response instanceof Map<?, ?> resMap) {
+            Object naverId = resMap.get("id");
+            if (naverId != null && !naverId.toString().isBlank()) {
+                return naverId.toString();
+            }
+        }
+
+        throw new IllegalArgumentException("OAuth userId를 찾을 수 없습니다.");
     }
 }
 

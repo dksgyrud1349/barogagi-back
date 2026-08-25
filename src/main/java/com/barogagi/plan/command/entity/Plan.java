@@ -54,9 +54,12 @@ public class Plan {
     @JoinColumn(name = "MEMBERSHIP_NO", nullable = false)
     private PlanUserMembershipInfo user;   // 회원 번호
 
-    @ManyToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "ITEM_NUM", nullable = false)
-    private Item item;                  // 아이템 번호
+    @ManyToOne(fetch = FetchType.LAZY, optional = true)
+    @JoinColumn(name = "ITEM_NUM", nullable = true)
+    private Item item;
+
+    @Column(name = "PLAN_MEMO")
+    private String planMemo;            // 메모
 
     // PLACE와 1:1 mapping
     @OneToOne(mappedBy = "plan", cascade = CascadeType.ALL, orphanRemoval = true)
@@ -78,6 +81,9 @@ public class Plan {
 
     @OneToMany(mappedBy = "plan", cascade = CascadeType.REMOVE, orphanRemoval = true)
     private List<PlanTag> planTags = new ArrayList<>();
+
+    @Column(name = "PLAN_SOURCE")
+    private String planSource;
 
     public void markDeleted() {
         this.delYn = "Y";

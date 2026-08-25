@@ -1,22 +1,29 @@
 package com.barogagi.member.join.oauth.service;
 
 import com.barogagi.member.domain.UserMembershipInfo;
+import com.barogagi.member.join.basic.dto.Gender;
 import com.barogagi.member.join.basic.dto.JoinRequestDTO;
+import com.barogagi.member.join.basic.exception.JoinException;
 import com.barogagi.member.join.basic.service.MemberSignupService;
 import com.barogagi.member.join.oauth.dto.OAuth2UserDTO;
+import com.barogagi.member.join.oauth.exception.OAuthJoinException;
+import com.barogagi.member.repository.DeletedMembershipRepository;
 import com.barogagi.member.service.UserMembershipService;
 import com.barogagi.util.EncryptUtil;
+import com.barogagi.util.exception.ErrorCode;
 import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.oauth2.client.userinfo.DefaultOAuth2UserService;
 import org.springframework.security.oauth2.client.userinfo.OAuth2UserRequest;
+import org.springframework.security.oauth2.core.OAuth2AuthenticationException;
 import org.springframework.security.oauth2.core.user.DefaultOAuth2User;
 import org.springframework.security.oauth2.core.user.OAuth2User;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
 
@@ -28,13 +35,15 @@ public class NaverOAuth2UserService extends DefaultOAuth2UserService {
     private final MemberSignupService memberSignupService;
     private final UserMembershipService userMembershipService;
 
+    private final DeletedMembershipRepository deletedMembershipRepository;
+
+    private static final int REJOIN_BLOCK_DAYS = 90;
+
     private static final Logger logger = LoggerFactory.getLogger(NaverOAuth2UserService.class);
 
     @Override
     @Transactional
     public OAuth2User loadUser(OAuth2UserRequest req) {
-
-        String nameAttributeKey;  // getName()에서 쓸 키(id)
 
         OAuth2User user = super.loadUser(req);
 
@@ -48,12 +57,9 @@ public class NaverOAuth2UserService extends DefaultOAuth2UserService {
         @SuppressWarnings("unchecked")
         Map<String, Object> resp = (Map<String, Object>) attrs.get("response");
 
-        logger.info("resp={}", resp);
         if (resp == null) {
-            throw new IllegalStateException("Naver userinfo has no 'response' field");
+            throw new JoinException(ErrorCode.FAIL_SIGN_UP);
         }
-
-        nameAttributeKey = "id"; // 네이버는 id가 고유 식별자
 
         String id = str(resp.get("id"));
         String nickName = str(resp.get("nickname"));
@@ -64,6 +70,13 @@ public class NaverOAuth2UserService extends DefaultOAuth2UserService {
         String tel = str(resp.get("mobile"));
 
         try {
+            // 일정 기간 동안 동일한 아이디로 회원가입 금지
+            LocalDateTime limitDate = LocalDateTime.now().minusDays(REJOIN_BLOCK_DAYS);
+            boolean blocked = deletedMembershipRepository.existsRecentlyWithdrawnUser(id.trim(), limitDate);
+            if (blocked) {
+                throw new OAuthJoinException(ErrorCode.NO_SIGN_UP_DAYS);
+            }
+
             // 네이버로 회원가입한 정보가 있는지 체크
             OAuth2UserDTO oAuth2UserDTO = new OAuth2UserDTO();
             oAuth2UserDTO.setSub(id);
@@ -81,30 +94,25 @@ public class NaverOAuth2UserService extends DefaultOAuth2UserService {
                 joinRequestDTO.setNickName(nickName);
                 joinRequestDTO.setJoinType("NAVER");
 
-                // gender(성별) : M(남성), F(여성), U(미설정)
-                logger.info("@@ gender={}", null != gender);
-                if(null != gender) {
-                    if(gender.equals("M")) {  // 남성
-                        joinRequestDTO.setGender("M");
-                    } else if(gender.equals("F")) {  // 여성
-                        joinRequestDTO.setGender("W");
-                    } else {
-                        joinRequestDTO.setGender("");
+                // gender(성별) : M(남성), F(여성)
+                if (null != gender) {
+                    if (gender.equals("M")) {  // 남성
+                        joinRequestDTO.setGender(Gender.M);
+                    } else if (gender.equals("F")) {  // 여성
+                        joinRequestDTO.setGender(Gender.W);
                     }
                 }
 
-                logger.info("@@ birthday & birthyear={}", null != birthday && null != birthyear);
-                if(null != birthday && null != birthyear) {
+                if (null != birthday && null != birthyear) {
                     // BIRTH(생년월일) (출생연도 + 생일)
                     String birth = birthyear;
-                    if(birthday.contains("-")) {
+                    if (birthday.contains("-")) {
                         birth = birth + birthday.replace("-", "");
                     }
                     joinRequestDTO.setBirth(birth);
                 }
 
-                logger.info("@@ tel={}", null != tel);
-                if(null != tel) {
+                if (null != tel) {
                     // 휴대 전화번호
                     joinRequestDTO.setTel(encryptUtil.encrypt(tel.replaceAll("[^0-9]", "")));
                 }
@@ -113,12 +121,15 @@ public class NaverOAuth2UserService extends DefaultOAuth2UserService {
                 logger.info("NAVER join membershipNo={}", membershipNo);
             }
 
+        } catch (OAuthJoinException e) {
+            throw e;
+
         } catch (Exception e) {
             logger.error("NAVER OAuth 회원가입 중 오류 발생: {}", e.getMessage());
+            throw new OAuth2AuthenticationException(ErrorCode.FAIL_OAUTH2_LOGIN.getMessage());
         }
 
         // Naver는 OIDC가 아니라 OAuth2이므로 DefaultOAuth2User로 반환
-        // nameAttributeKey를 "id"로 주고, attributes는 'resp'(언래핑된 맵)로 설정
         return new DefaultOAuth2User(
                 List.of(new SimpleGrantedAuthority("ROLE_USER")),
                 resp,

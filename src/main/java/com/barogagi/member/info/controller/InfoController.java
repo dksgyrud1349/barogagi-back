@@ -19,11 +19,12 @@ public class InfoController {
         this.memberService = memberService;
     }
 
-    @Operation(summary = "회원 정보 조회", description = "회원 정보 조회 기능입니다.",
+    @Operation(summary = "회원 정보 조회 기능", description = "회원 정보 조회 기능입니다.",
             responses =  {
                     @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "A401", description = "접근 권한이 존재하지 않습니다."),
                     @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "L102", description = "회원 정보가 존재하지 않습니다."),
                     @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "M200", description = "회원 정보 조회가 완료되었습니다."),
+                    @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "C400", description = "지역 코드 정보를 찾을 수 없습니다."),
                     @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "400", description = "오류가 발생하였습니다.")
             })
     @GetMapping
@@ -31,13 +32,16 @@ public class InfoController {
         return memberService.getUserInfo(request);
     }
 
-    @Operation(summary = "회원 정보 수정", description = "회원 정보 조회 수정입니다.",
+    @Operation(summary = "회원 정보 수정 기능", description = "회원 정보 조회 수정입니다.",
             responses =  {
                     @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "A401", description = "접근 권한이 존재하지 않습니다."),
                     @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "L102", description = "회원 정보가 존재하지 않습니다."),
                     @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "N103", description = "해당 닉네임 사용이 불가능합니다."),
                     @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "M404", description = "사용자 정보 수정 실패하였습니다."),
+                    @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "M401", description = "성별 데이터가 올바르지 않습니다."),
                     @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "M200", description = "사용자 정보 수정 완료하였습니다."),
+                    @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "S401", description = "올바른 생년월일 형식이 아닙니다."),
+                    @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "C400", description = "지역 코드 정보를 찾을 수 없습니다."),
                     @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "400", description = "오류가 발생하였습니다.")
             })
     @PatchMapping

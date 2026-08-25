@@ -4,31 +4,51 @@ import com.barogagi.member.join.oauth.service.CustomOidcUserService;
 import com.barogagi.member.join.oauth.service.DelegatingOAuth2UserService;
 import com.barogagi.util.exception.ErrorCode;
 import jakarta.servlet.http.HttpServletResponse;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.oauth2.client.registration.ClientRegistrationRepository;
+import org.springframework.security.oauth2.client.web.AuthorizationRequestRepository;
+import org.springframework.security.oauth2.client.web.OAuth2AuthorizationRequestResolver;
+import org.springframework.security.oauth2.core.endpoint.OAuth2AuthorizationRequest;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+import org.springframework.web.cors.CorsConfiguration;
+import org.springframework.web.cors.CorsConfigurationSource;
+import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
+import java.util.Arrays;
+import java.util.List;
+
+@Slf4j
 @Configuration
 @EnableWebSecurity
 public class SecurityConfig {
 
-    Logger logger = LoggerFactory.getLogger(SecurityConfig.class);
+    @Value("${cors.allowed-origins}")
+    private String allowedOrigins;
 
     private final JwtAuthFilter jwtAuthFilter;
     private final OAuth2LoginSuccessHandler oAuth2LoginSuccessHandler;
+    private final OAuth2LoginFailureHandler oAuth2LoginFailureHandler;
+    private final AuthorizationRequestRepository<OAuth2AuthorizationRequest> authorizationRequestRepository;
 
-    public SecurityConfig(JwtAuthFilter jwtAuthFilter,
-                          OAuth2LoginSuccessHandler oAuth2LoginSuccessHandler) {
+    public SecurityConfig(
+            JwtAuthFilter jwtAuthFilter,
+            OAuth2LoginSuccessHandler oAuth2LoginSuccessHandler,
+            OAuth2LoginFailureHandler oAuth2LoginFailureHandler,
+            AuthorizationRequestRepository<OAuth2AuthorizationRequest> authorizationRequestRepository
+    ) {
         this.jwtAuthFilter = jwtAuthFilter;
         this.oAuth2LoginSuccessHandler = oAuth2LoginSuccessHandler;
-        logger.info("@@ jwtAuthFilter={}", jwtAuthFilter);
+        this.oAuth2LoginFailureHandler = oAuth2LoginFailureHandler;
+        this.authorizationRequestRepository = authorizationRequestRepository;
+        log.info("@@ jwtAuthFilter={}", jwtAuthFilter);
     }
 
     private static final String[] PERMIT_URL_ARRAY = {
@@ -41,24 +61,34 @@ public class SecurityConfig {
             "/oauth2/**",
             "/api/v1/auth/**",  // 일반 회원가입 관련
             "/api/v1/users/**",  // 로그인 관련
-            "/api/v1/terms/**",  // 약관 관련
+            "/api/v1/terms",  // 약관 조회 관련
             "/api/v1/home/tags/popular",  // 인기 태그 조회
             "/api/v1/home/regions/popular",  // 인기 지역 조회
-            "/api/v1/verification-codes/**"  // 인증 번호 발송
+            "/api/v1/home/regions/code",  // 공공기관 지역코드 조회 기능
+            "/api/v1/home/regions/hot-place",  // 핫플레이스 조회 기능
+            "/api/v1/verification-codes/**",  // 인증 번호 발송
+            "/api/v1/withdrawal-reasons",  // 탈퇴 사유 조회
+            "api/v1/schedule/image/proxy",  // 일정 이미지 프록시 (외부 이미지 허용)
+            "/api/v1/oauth-link",
+            "/oauth/callback",  // oauth 로그인 성공 시 redirect
+            "/images/**",  // 이미지
+            "/api/v1/schedule/share/**",  // 일정 공유 화면
+            "/api/v1/weather/**"
     };
 
     @Bean
     SecurityFilterChain filterChain(
             HttpSecurity http,
-            com.fasterxml.jackson.databind.ObjectMapper objectMapper,
             CustomOidcUserService customOidcUserService,    // 구글용 (OIDC)
-            DelegatingOAuth2UserService delegatingOAuth2UserService   // 네이버, 카카오용 (OAuth2)
+            DelegatingOAuth2UserService delegatingOAuth2UserService,   // 네이버, 카카오용 (OAuth2)
+            OAuth2AuthorizationRequestResolver oauth2AuthorizationRequestResolver
     ) throws Exception {
 
         http
+                .cors(cors -> cors.configurationSource(corsConfigurationSource()))
                 .csrf(csrf -> csrf.disable())
                 // API 서버 권장: 무상태
-                .sessionManagement(sm -> sm.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+                .sessionManagement(sm -> sm.sessionCreationPolicy(SessionCreationPolicy.IF_REQUIRED))
                 .authorizeHttpRequests(auth -> auth
                         // CORS preflight 허용
                         .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
@@ -67,28 +97,54 @@ public class SecurityConfig {
                         .anyRequest().authenticated()
                 )
                 .oauth2Login(oauth -> oauth
+                        .authorizationEndpoint(endpoint -> endpoint
+                                .authorizationRequestResolver(oauth2AuthorizationRequestResolver)
+                                .authorizationRequestRepository(authorizationRequestRepository)
+                        )
                         .userInfoEndpoint(u -> u
                                 .oidcUserService(customOidcUserService)   // Google
-                                .userService(delegatingOAuth2UserService)      // Naver, Kakao
+                                .userService(delegatingOAuth2UserService) // Naver, Kakao
                         )
                         .successHandler(oAuth2LoginSuccessHandler)  // 로그인 성공 핸들러 (토큰 발급 등)
+                        .failureHandler(oAuth2LoginFailureHandler)  // 로그인 실패 핸들러
                 )
                 .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)
                 // 브라우저 리다이렉트 대신 401 JSON
                 .exceptionHandling(ex -> ex.authenticationEntryPoint((req, res, e) -> {
 
-                    String resultCode = ErrorCode.NOT_EXIST_ACCESS_AUTH.getCode();
-                    String message = ErrorCode.NOT_EXIST_ACCESS_AUTH.getMessage();
+                    String resultCode = ErrorCode.INVALID_REQUEST.getCode();
+                    String message = ErrorCode.INVALID_REQUEST.getMessage();
 
                     res.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
                     res.setContentType("application/json;charset=UTF-8");
                     String json = String.format(
-                            "{\"resultCode\":\"%s\", \"message\":\"%s\"}",
+                            "{\"code\":\"%s\", \"message\":\"%s\"}",
                             resultCode, message
                     );
                     res.getWriter().write(json);
                 }));
 
         return http.build();
+    }
+
+    @Bean
+    public CorsConfigurationSource corsConfigurationSource() {
+        CorsConfiguration config = new CorsConfiguration();
+
+        List<String> origins = Arrays.asList(allowedOrigins.split(","));
+
+        config.setAllowedOrigins(origins);
+        config.setAllowedMethods(List.of("GET","POST","PUT","PATCH","DELETE","OPTIONS"));
+        config.setAllowedHeaders(List.of("*"));
+        config.setAllowCredentials(true);
+
+        UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+        source.registerCorsConfiguration("/**", config);
+        return source;
+    }
+
+    @Bean
+    public OAuth2AuthorizationRequestResolver oauth2AuthorizationRequestResolver(ClientRegistrationRepository clientRegistrationRepository) {
+        return new CustomOAuth2AuthorizationRequestResolver(clientRegistrationRepository);
     }
 }

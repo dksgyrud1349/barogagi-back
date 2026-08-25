@@ -1,6 +1,6 @@
 package com.barogagi.member.domain;
 
-import com.barogagi.config.vo.DefaultVO;
+import com.barogagi.member.join.basic.dto.Gender;
 import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.persistence.*;
 import lombok.*;
@@ -9,6 +9,7 @@ import org.springframework.data.annotation.LastModifiedDate;
 import org.springframework.data.jpa.domain.support.AuditingEntityListener;
 
 import java.time.LocalDateTime;
+import java.util.Date;
 
 @Entity
 @EntityListeners(AuditingEntityListener.class)
@@ -17,7 +18,7 @@ import java.time.LocalDateTime;
 @NoArgsConstructor(access = AccessLevel.PROTECTED)
 @AllArgsConstructor
 @Builder(toBuilder = true)
-public class UserMembershipInfo extends DefaultVO {
+public class UserMembershipInfo {
 
     @Schema(description = "회원번호", example = "D18513EW81")
     @Id
@@ -46,9 +47,10 @@ public class UserMembershipInfo extends DefaultVO {
     private String tel;
 
     @Schema(description = "성별 (M : 남 / W : 여)", example = "M")
+    @Enumerated(EnumType.STRING)
     @Column(name = "GENDER")
     @Setter
-    private String gender;
+    private Gender gender;
 
     @Schema(description = "닉네임", example = "가나다")
     @Column(name = "NICKNAME")
@@ -59,6 +61,10 @@ public class UserMembershipInfo extends DefaultVO {
     @Column(name = "JOIN_TYPE", nullable = false)
     private String joinType;
 
+    @Enumerated(EnumType.STRING)
+    @Column(name = "STATUS", nullable = false)
+    private MembershipStatus status;
+
     @CreatedDate
     @Column(name = "REG_DATE", updatable = false)
     private LocalDateTime regDate;
@@ -66,6 +72,19 @@ public class UserMembershipInfo extends DefaultVO {
     @LastModifiedDate
     @Column(name = "UPD_DATE")
     private LocalDateTime updDate;
+
+    @Column(name = "DEL_DATE")
+    private Date delDate;
+
+    @Column(name = "REASON_NO")
+    private int reasonNo;
+
+    @Column(name = "WITHDRAW_REASON")
+    private String withdrawReason;
+
+    @Column(name = "PREFERRED_LOCAL_CODE_NO")
+    @Setter
+    private Long preferredLocalCodeNo;
 
     /*
         비밀번호 변경

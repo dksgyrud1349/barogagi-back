@@ -1,5 +1,6 @@
 package com.barogagi.member.info.dto;
 
+import com.barogagi.member.join.basic.dto.Gender;
 import lombok.Builder;
 import lombok.Getter;
 import lombok.Setter;
@@ -30,10 +31,13 @@ public class UserInfoResponseDTO {
     private String tel = "";
 
     // 성별 (M : 남 / W : 여)
-    private String gender = "";
+    private Gender gender;
 
     // 닉네임
     private String nickName = "";
+
+    // 선호 지역 코드 번호
+    private Long preferredLocalCodeNo;
 
     // 회원가입 종류(BASIC : 기본 / GOOGLE : 구글 / KAKAO : 카카오톡 / NAVER : 네이버)
     private String joinType = "";

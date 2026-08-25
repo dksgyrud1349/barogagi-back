@@ -1,5 +1,6 @@
 package com.barogagi.member.login.service;
 
+import com.barogagi.member.domain.MembershipStatus;
 import com.barogagi.member.domain.UserMembershipInfo;
 import com.barogagi.member.login.dto.*;
 import com.barogagi.member.login.exception.LoginException;
@@ -10,6 +11,8 @@ import com.barogagi.util.InputValidate;
 import com.barogagi.util.Validator;
 import com.barogagi.util.exception.ErrorCode;
 import lombok.RequiredArgsConstructor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -23,6 +26,8 @@ import java.util.Map;
 @Transactional
 public class LoginService {
 
+    Logger logger = LoggerFactory.getLogger(LoginService.class);
+
     private final Validator validator;
     private final InputValidate inputValidate;
     private final EncryptUtil encryptUtil;
@@ -34,7 +39,6 @@ public class LoginService {
 
         String resultCode = "";
         String message = "";
-        List<UserIdDTO> userIdList = null;
 
         // 1. API SECRET KEY 일치 여부 확인
         if(!validator.apiSecretKeyCheck(apiSecretKey)) {
@@ -46,26 +50,25 @@ public class LoginService {
             throw new LoginException(ErrorCode.EMPTY_DATA);
         }
 
-        List<UserIdDTO> searchIdList = userMembershipRepository.findByTel(encryptUtil.encrypt(tel.replaceAll("[^0-9]", "")));
+        UserIdDTO searchId = userMembershipRepository.findByTel(encryptUtil.encrypt(tel.replaceAll("[^0-9]", "")));
 
-        if(searchIdList.isEmpty()) {
+        if(null == searchId) {
             resultCode = ErrorCode.NOT_FOUND_ACCOUNT.getCode();
             message = ErrorCode.NOT_FOUND_ACCOUNT.getMessage();
         } else {
             resultCode = ErrorCode.FOUND_ACCOUNT.getCode();
             message = ErrorCode.FOUND_ACCOUNT.getMessage();
-            userIdList = searchIdList;
         }
 
-        return ApiResponse.resultData(userIdList, resultCode, message);
+        return ApiResponse.resultData(searchId, resultCode, message);
     }
 
-    public ApiResponse resetPassword(LoginDTO loginDTO) {
+    public ApiResponse resetPassword(String apiSecretKey, LoginDTO loginDTO) {
         String resultCode = "";
         String message = "";
 
         // 1. API SECRET KEY 일치 여부 확인
-        if(!validator.apiSecretKeyCheck(loginDTO.getApiSecretKey())) {
+        if(!validator.apiSecretKeyCheck(apiSecretKey)) {
             throw new LoginException(ErrorCode.NOT_EQUAL_API_SECRET_KEY);
         }
 
@@ -90,14 +93,10 @@ public class LoginService {
         return ApiResponse.result(ErrorCode.SUCCESS_UPDATE_PASSWORD.getCode(), ErrorCode.SUCCESS_UPDATE_PASSWORD.getMessage());
     }
 
-    public ApiResponse login(LoginDTO loginDTO) {
-
-        String resultCode = "";
-        String message = "";
-        Map<String, Object> dataMap = new HashMap<>();
+    public ApiResponse login(String apiSecretKey, LoginDTO loginDTO) {
 
         // 1. API SECRET KEY 일치 여부 확인
-        if(!validator.apiSecretKeyCheck(loginDTO.getApiSecretKey())) {
+        if(!validator.apiSecretKeyCheck(apiSecretKey)) {
             throw new LoginException(ErrorCode.NOT_EQUAL_API_SECRET_KEY);
         }
 
@@ -119,36 +118,49 @@ public class LoginService {
         }
 
         // 5. ACCESS, REFRESH TOKEN 생성 & REFRESH TOKEN 저장
-        LoginResponse loginResponse = authService.loginAfterSignup(userInfo.getUserId(), "web-basic");
+        LoginResponse loginResponse = authService.loginAfterSignup(userInfo.getUserId(), loginDTO.getDeviceId());
 
-        resultCode = loginResponse.tokens().resultCode();
-        message = loginResponse.tokens().message();
+        // 토큰 발급 성공
+        if(loginResponse.tokens().resultCode().equals("R200")) {
+            // 회원 탈퇴 신청했다가 다시 재로그인을 했을 경우
+            if(MembershipStatus.WITHDRAWAL_PENDING == userInfo.getStatus()) {
+                userMembershipRepository.restoreWithdrawal(
+                        loginResponse.membershipNo(),
+                        MembershipStatus.ACTIVE,
+                        MembershipStatus.WITHDRAWAL_PENDING
+                );
+            }
 
-        dataMap = Map.of(
-                "accessToken", loginResponse.tokens().accessToken(),
-                "accessTokenExpiresIn", loginResponse.tokens().accessTokenExpiresIn(),
-                "userId", userInfo.getUserId(),
-                "membershipNo", loginResponse.membershipNo(),
-                "refreshToken", loginResponse.tokens().refreshToken(),
-                "refreshTokenExpiresIn", loginResponse.tokens().refreshTokenExpiresIn()
-        );
+            Map<String, Object> dataMap = Map.of(
+                    "accessToken", loginResponse.tokens().accessToken(),
+                    "accessTokenExpiresIn", loginResponse.tokens().accessTokenExpiresIn(),
+                    "userId", userInfo.getUserId(),
+                    "membershipNo", loginResponse.membershipNo(),
+                    "refreshToken", loginResponse.tokens().refreshToken(),
+                    "refreshTokenExpiresIn", loginResponse.tokens().refreshTokenExpiresIn(),
+                    "deviceId", loginResponse.deviceId()
+            );
 
-        return ApiResponse.resultData(dataMap, resultCode, message);
+            return ApiResponse.resultData(dataMap, ErrorCode.SUCCESS_LOGIN.getCode(), ErrorCode.SUCCESS_LOGIN.getMessage());
+
+        } else {
+            return ApiResponse.result(ErrorCode.FAIL_LOGIN);
+        }
     }
 
-    public ApiResponse refreshToken(RefreshTokenRequestDTO refreshTokenRequestDTO) {
+    public ApiResponse refreshToken(String refreshToken) {
 
         String resultCode = "";
         String message = "";
         Map<String, Object> data = new HashMap<>();
 
         // 1. 필수 입력값 확인
-        if (inputValidate.isEmpty(refreshTokenRequestDTO.getRefreshToken())) {
+        if (inputValidate.isEmpty(refreshToken)) {
             throw new LoginException(ErrorCode.EMPTY_DATA);
         }
 
         // 2. ACCESS, REFRESH TOKEN 재생성
-        TokenPair pair = authService.rotate(refreshTokenRequestDTO.getRefreshToken());
+        TokenPair pair = authService.rotate(refreshToken);
 
         resultCode = pair.resultCode();
         message = pair.message();
@@ -165,17 +177,17 @@ public class LoginService {
         return ApiResponse.resultData(data, resultCode, message);
     }
 
-    public ApiResponse logout(RefreshTokenRequestDTO refreshTokenRequestDTO) {
+    public ApiResponse logout(String refreshToken) {
 
         try {
 
             // 1. 필수 입력값 확인
-            if(inputValidate.isEmpty(refreshTokenRequestDTO.getRefreshToken())) {
+            if(inputValidate.isEmpty(refreshToken)) {
                 throw new LoginException(ErrorCode.EMPTY_DATA);
             }
 
             // 2. 로그아웃
-            boolean result = authService.logout(refreshTokenRequestDTO.getRefreshToken()); // DB REVOKE
+            boolean result = authService.logout(refreshToken); // DB REVOKE
             if(result) {
                 return ApiResponse.result(ErrorCode.SUCCESS_LOGOUT);
             } else {

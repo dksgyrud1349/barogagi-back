@@ -6,6 +6,7 @@ import com.barogagi.region.dto.RegionRegistReqDTO;
 import com.barogagi.tag.dto.TagRegistReqDTO;
 import com.barogagi.tag.dto.TagRegistResDTO;
 import io.swagger.v3.oas.annotations.media.Schema;
+import jakarta.persistence.Column;
 import lombok.Builder;
 import lombok.Getter;
 import lombok.ToString;
@@ -28,16 +29,16 @@ public class PlanRegistResDTO {
     @Schema(description = "종료 시간", example = "09:00")
     public String endTime;
 
-    @Schema(description = "아이템 번호", example = "1")
+    @Schema(description = "아이템 번호", example = "2")
     public int itemNum;
 
-    @Schema(description = "아이템 명", example = "1")
+    @Schema(description = "아이템 명", example = "한식")
     public String itemNm;
 
     @Schema(description = "카테고리 번호", example = "1")
     public int categoryNum;
 
-    @Schema(description = "카테고리 명", example = "1")
+    @Schema(description = "카테고리 명", example = "식사")
     public String categoryNm;
 
     @Schema(description = "장소 번호")
@@ -48,6 +49,9 @@ public class PlanRegistResDTO {
 
     @Schema(description = "장소 링크(이미지 불러오기용)")
     public String planLink;
+
+    @Schema(description = "이미지 url")
+    private String imageUrl;
 
     @Schema(description = "장소 한줄 설명(ai 생성)")
     public String planDescription;
@@ -60,6 +64,12 @@ public class PlanRegistResDTO {
 
     @Schema(description = "지역 번호")
     public Integer regionNum;
+
+    @Schema(description = "메모")
+    private String planMemo;
+
+    @Schema(description = "사용자가 수동으로 추가한 일정인지 여부(AI 생성 안함)", example = "Y")
+    public String isUserAdded;
 
     @Schema(description = "계획 태그 목록")
     public List<TagRegistResDTO> planTagRegistResDTOList;
